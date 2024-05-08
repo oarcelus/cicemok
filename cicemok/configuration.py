@@ -1,0 +1,35 @@
+import dataclasses
+import numpy as np
+import chaospy as cp
+
+@dataclasses.dataclass
+class ExperimentConfiguration:
+    rmax: float
+    dt: float
+    minsoc: float
+    maxsoc: float
+    minrate: float
+    maxrate: float
+    dynamics: float = 0.0
+    rate: float = 0.0
+    isoc: float = 0.0
+    texp: float = 0.0
+    experiment: np.ndarray | None = None
+
+
+@dataclasses.dataclass
+class ComsolConfiguration:
+    names: list[str]
+    expression: list[str]
+    unit: list[str]
+    database: str
+    experiment: ExperimentConfiguration | None = None
+
+
+@dataclasses.dataclass
+class SensitivityConfiguration:
+    order: int
+    distribution: cp.J
+    rule: str
+    config: ComsolConfiguration
+    
