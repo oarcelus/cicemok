@@ -6,6 +6,9 @@ try:
 except IOError:
     long_description = ""
 
+with open('requirements.txt') as f:
+    required = f.read().splitlines()
+
 setup(
     name="CICEMOK",
     version="0.1.0",
@@ -13,8 +16,8 @@ setup(
     license="MIT",
     author="oarcelus",
     packages=find_packages(),
-    install_requires=[],
     long_description=long_description,
+    install_requires=required,
     classifiers=[
         "Programming Language :: Python",
         "Programming Language :: Python :: 3.11",
