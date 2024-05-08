@@ -99,7 +99,9 @@ def init_parallel_optimization(np: int = 1, ncores: int = 1, **kwargs):
         jobs.put(name)
 
     for _ in range(np):
-        process = multiprocessing.Process(target=lambda x, y: parallel_worker(x, y, **kwargs), args=(ncores, jobs))
+        process = multiprocessing.Process(
+            target=lambda x, y: parallel_worker(x, y, **kwargs), args=(ncores, jobs)
+        )
         process.start()
 
 
@@ -121,6 +123,9 @@ def parallel_worker(
     expression: list[str],
     units: list[str],
     database: str,
+    iappname: str,
+    i1Cname: str,
+    isocname: str,
     order: int,
     distribution: cp.J,
     rule: str,
@@ -156,7 +161,13 @@ def parallel_worker(
 
     # Build Comsol Config
     comsol_cfg = ComsolConfiguration(
-        names=names, expression=expression, unit=units, database=database
+        names=names,
+        expression=expression,
+        unit=units,
+        database=database,
+        iappname=iappname,
+        i1Cname=i1Cname,
+        isocname=isocname,
     )
 
     # Build Sensititvity Config
@@ -205,6 +216,9 @@ def init_experiment_optimization(
     expression: list[str],
     units: list[str],
     database: str,
+    iappname: str,
+    i1Cname: str,
+    isocname: str,
     order: int,
     distribution: cp.J,
     rule: str,
@@ -240,7 +254,13 @@ def init_experiment_optimization(
 
     # Build Comsol Config
     comsol_cfg = ComsolConfiguration(
-        names=names, expression=expression, unit=units, database=database
+        names=names,
+        expression=expression,
+        unit=units,
+        database=database,
+        iappname=iappname,
+        i1Cname=i1Cname,
+        isocname=isocname,
     )
 
     # Build Sensititvity Config
@@ -263,79 +283,6 @@ def init_experiment_optimization(
         optimizer.maximize(
             init_points=init_points, n_iter=n_iter, acquisition_function=acquisition
         )
-
-
-def continue_experiment_optimization(
-    dynamics: tuple[float, float],
-    isoc: tuple[float, float],
-    rate: tuple[float, float],
-    texp: tuple[float, float],
-    rmax: float,
-    dt: float,
-    minsoc: float,
-    maxsoc: float,
-    minrate: float,
-    maxrate: float,
-    filename: str,
-    names: list[str],
-    expression: list[str],
-    units: list[str],
-    database: str,
-    order: int,
-    distribution: cp.J,
-    rule: str,
-    kind: str,
-    kappa_decay: int,
-    kappa_decay_delay: int,
-    n_iter: int,
-    log_files: list[str],
-):
-    global experiment_cfg
-    global model
-    global comsol_cfg
-    global sens_cfg
-    global bo_iter
-
-    # Start Comsol Client
-    client = comsol.start_client()
-
-    # Open COMSOL model
-    model = comsol.load_model(client, filename)
-
-    # Build Experiment
-    experiment_cfg = ExperimentConfiguration(
-        rmax=rmax,
-        dt=dt,
-        minsoc=minsoc,
-        maxsoc=maxsoc,
-        minrate=minrate,
-        maxrate=maxrate,
-    )
-
-    # Build Comsol Config
-    comsol_cfg = ComsolConfiguration(
-        names=names, expression=expression, unit=units, database=database
-    )
-
-    # Build Sensititvity Config
-    sens_cfg = SensitivityConfiguration(
-        order=order, distribution=distribution, rule=rule, config=comsol_cfg
-    )
-
-    # Set Bayessian Optimizer for each target parameter
-    bounds = {"dynamics": dynamics, "isoc": isoc, "rate": rate, "texp": texp}
-    for log in log_files:
-        bo_iter = 0
-        optimizer = BayesianOptimization(
-            f=experiment_optimization, pbounds=bounds, verbose=2
-        )
-        acquisition = UtilityFunction(
-            kind=kind, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
-        )
-        load_logs(optimizer, logs=[log])
-        logger = JSONLogger(path=log, reset=False)
-        optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
-        optimizer.maximize(n_iter=n_iter, acquisition_function=acquisition)
 
 
 def experiment_optimization(

@@ -52,13 +52,13 @@ def set_events(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     model.java.physics().remove("ev")
     model.java.physics().create("ev", "Events", "geom1")
     model.java.component("comp1").physics("ev").create("ds1", "DiscreteStates", -1)
-    model.java.component("comp1").physics("ev").feature("ds1").setIndex("dim", "Iapp", 0, 0)
-    model.java.component("comp1").physics("ev").feature("ds1").setIndex("dimInit", f"I_1C*{config.experiment.experiment[0]}", 0, 0)
+    model.java.component("comp1").physics("ev").feature("ds1").setIndex("dim", config.iappname, 0, 0)
+    model.java.component("comp1").physics("ev").feature("ds1").setIndex("dimInit", f"{config.i1Cname}*{config.experiment.experiment[0]}", 0, 0)
     for i, step in enumerate(config.experiment.experiment):
         model.java.component("comp1").physics("ev").create(f"expl{i}", "ExplicitEvent", -1)
         model.java.component("comp1").physics("ev").feature(f"expl{i}").set("start", t)
-        model.java.component("comp1").physics("ev").feature(f"expl{i}").setIndex("reInitName", "Iapp", 0, 0)
-        model.java.component("comp1").physics("ev").feature(f"expl{i}").setIndex("reInitValue", f"I_1C*{step}", 0, 0)
+        model.java.component("comp1").physics("ev").feature(f"expl{i}").setIndex("reInitName", config.iappname, 0, 0)
+        model.java.component("comp1").physics("ev").feature(f"expl{i}").setIndex("reInitValue", f"{config.i1Cname}*{step}", 0, 0)
         t += dt
 
     return model
@@ -80,7 +80,7 @@ def set_soc(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     assert config.experiment is not None
     assert config.experiment.experiment is not None
 
-    model.java.component("comp1").variable("var1").set("socinit_LMO", config.experiment.isoc)
+    model.java.component("comp1").variable("var1").set(config.isocname, config.experiment.isoc)
 
     return model
 
