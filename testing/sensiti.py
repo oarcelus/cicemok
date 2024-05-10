@@ -1,13 +1,14 @@
 import chaospy as cp
 from cicemok.ode import init_experiment_optimization, init_parallel_optimization
 
-
 def main():
     distribution = cp.J(
-        cp.Uniform(1.2e-19, 1.2e-16),
-        cp.Uniform(0.01, 100.0),
-        cp.Uniform(0.1, 10.0),
-        cp.Uniform(50.0, 500.0),
+        cp.Uniform(1e-18, 1e-14),
+        cp.Uniform(1e-18, 1e-14),
+        cp.Uniform(1e-13, 1e-9),
+        cp.Uniform(1e-13, 1e-9),
+        #cp.Uniform(1.0, 10.0),
+        #cp.Uniform(0.1, 4.0),
     )
 
     init_parallel_optimization(
@@ -23,22 +24,22 @@ def main():
         maxsoc=0.95,
         minrate=0.02,
         maxrate=2.0,
-        filename="./comsol_models/CP_01000_goodfit_H1H2.mph",
-        names=["D_LMO", "sigma_LMO", "i0_ref_LMO", "rpLMO"],
+        filename="./comsol_models/nib_withsoc.mph",
+        names=["Ds_p", "Ds_n", "k_p", "k_n"],#, "R_n", "R_p"],
         expression=["t", "liion.phis0_ec1"],
-        units=["m^2/s", "S/m", "A/m^2", "nm"],
+        units=["m^2/s", "m^2/s", "m/s", "m/s"],#, "um", "um"],
         database="Study 1//Solution 1",
-        evname="Iapp",
-        isocname="socinit_LMO",
+        evname="C_rate",
+        isocname="isoc",
         order=1,
         distribution=distribution,
         rule="latin_hypercube",
         kind="ucb",
         kappa_decay=1.0,
         kappa_decay_delay=0,
-        init_points=2,
-        n_iter=5,
-        log_name="test",
+        init_points=1,
+        n_iter=10,
+        log_name="nib_log",
     )
 
 

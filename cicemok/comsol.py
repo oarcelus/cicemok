@@ -52,13 +52,13 @@ def set_events(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     model.java.physics().remove("ev")
     model.java.physics().create("ev", "Events", "geom1")
     model.java.component("comp1").physics("ev").create("ds1", "DiscreteStates", -1)
-    model.java.component("comp1").physics("ev").feature("ds1").setIndex("dim", config.iappname, 0, 0)
-    model.java.component("comp1").physics("ev").feature("ds1").setIndex("dimInit", f"{config.i1Cname}*{config.experiment.experiment[0]}", 0, 0)
+    model.java.component("comp1").physics("ev").feature("ds1").setIndex("dim", config.evname, 0, 0)
+    model.java.component("comp1").physics("ev").feature("ds1").setIndex("dimInit", f"{config.experiment.experiment[0]}", 0, 0)
     for i, step in enumerate(config.experiment.experiment):
         model.java.component("comp1").physics("ev").create(f"expl{i}", "ExplicitEvent", -1)
         model.java.component("comp1").physics("ev").feature(f"expl{i}").set("start", t)
-        model.java.component("comp1").physics("ev").feature(f"expl{i}").setIndex("reInitName", config.iappname, 0, 0)
-        model.java.component("comp1").physics("ev").feature(f"expl{i}").setIndex("reInitValue", f"{config.i1Cname}*{step}", 0, 0)
+        model.java.component("comp1").physics("ev").feature(f"expl{i}").setIndex("reInitName", config.evname, 0, 0)
+        model.java.component("comp1").physics("ev").feature(f"expl{i}").setIndex("reInitValue", f"{step}", 0, 0)
         t += dt
 
     return model
@@ -68,8 +68,7 @@ def set_timesteps(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     assert config.experiment is not None
     assert config.experiment.experiment is not None
 
-    dt = config.experiment.texp / config.experiment.experiment.shape[0] / 10
-
+    dt = config.experiment.texp / 1000
     model.java.study("std1").feature("time").set("tunit", "s")
     model.java.study("std1").feature("time").set("tlist", f"range(0,{dt},{config.experiment.texp})")
 
@@ -81,7 +80,7 @@ def set_soc(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     assert config.experiment.experiment is not None
 
     model.java.component("comp1").variable("var1").set(config.isocname, config.experiment.isoc)
-
+ 
     return model
 
 

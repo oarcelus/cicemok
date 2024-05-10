@@ -23,8 +23,7 @@ class ComsolConfiguration:
     expression: list[str]
     unit: list[str]
     database: str
-    iappname: str
-    i1Cname: str
+    evname: str
     isocname: str
     experiment: ExperimentConfiguration | None = None
 

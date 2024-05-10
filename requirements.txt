@@ -3,3 +3,4 @@ chaospy==4.3.13
 mph==1.2.3
 numpy==1.26.4
 setuptools==68.2.2
+pymatgen==2024.3.1

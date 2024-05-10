@@ -16,6 +16,8 @@ from cicemok.configuration import (
     SensitivityConfiguration,
 )
 
+import matplotlib.pyplot as plt
+
 
 def generate_experiment(config: ExperimentConfiguration) -> np.ndarray:
     assert (
@@ -26,8 +28,7 @@ def generate_experiment(config: ExperimentConfiguration) -> np.ndarray:
         and isinstance(config.dynamics, float)
     )
 
-    n = int(config.texp * config.dynamics / (2.0 * config.dt))
-
+    n = int(config.texp * config.dynamics / (2.0 * config.dt)) + 1
     gamma = cp.Gamma(config.rate, config.rate / config.rmax)
     samples = gamma.sample(n)
     samples = np.clip(samples, config.minrate, config.maxrate, out=samples)
@@ -123,8 +124,7 @@ def parallel_worker(
     expression: list[str],
     units: list[str],
     database: str,
-    iappname: str,
-    i1Cname: str,
+    evname: str,
     isocname: str,
     order: int,
     distribution: cp.J,
@@ -165,8 +165,7 @@ def parallel_worker(
         expression=expression,
         unit=units,
         database=database,
-        iappname=iappname,
-        i1Cname=i1Cname,
+        evname=evname,
         isocname=isocname,
     )
 
@@ -216,8 +215,7 @@ def init_experiment_optimization(
     expression: list[str],
     units: list[str],
     database: str,
-    iappname: str,
-    i1Cname: str,
+    evname: str,
     isocname: str,
     order: int,
     distribution: cp.J,
@@ -258,8 +256,7 @@ def init_experiment_optimization(
         expression=expression,
         unit=units,
         database=database,
-        iappname=iappname,
-        i1Cname=i1Cname,
+        evname=evname,
         isocname=isocname,
     )
 
@@ -309,14 +306,30 @@ def experiment_optimization(
     sens_cfg.config = comsol_cfg
 
     model = comsol.set_configuration(model, comsol_cfg)
-    time, evaluations = sensitivity.evaluate_models(model, sens_cfg)
-    sobol, surrogate = sensitivity.get_sobol(evaluations, sens_cfg)
+    polyno, samples, results = sensitivity.evaluate_models(model, sens_cfg)
 
     print(f"Paramer: {idx} -> BO Loop: {bo_iter}")
+    try:
+        time, evaluations = sensitivity.curate_none_evaluations(results, samples)
+    except ValueError as error:
+        print(error)
+        bo_iter += 1
+        return 0.0
+
+    try:
+        evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
+    except ValueError as error:
+        print(error)
+        bo_iter += 1
+        return 0.0
+
+    sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
+
     # Save surrogate for the current iteration
     with open(f"surrogate_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
         pickle.dump(surrogate, file)
 
+    # Save experiment for the current iteration
     with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
         pickle.dump(experiment, file)
 
