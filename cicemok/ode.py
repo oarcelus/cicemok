@@ -1,8 +1,11 @@
+import logging
+import multiprocessing
+import os
 import pickle
 import queue
 
 import chaospy as cp
-import multiprocessing
+import matplotlib.pyplot as plt
 import numpy as np
 from bayes_opt import BayesianOptimization, UtilityFunction
 from bayes_opt.event import Events
@@ -16,7 +19,9 @@ from cicemok.configuration import (
     SensitivityConfiguration,
 )
 
-import matplotlib.pyplot as plt
+
+_log = logging.getLogger("ode")
+_log.basicConfig(filename=os.path.join(os.getcwd(), "ode.log"), encoding="utf-8", level=logging.INFO)
 
 
 def generate_experiment(config: ExperimentConfiguration) -> np.ndarray:
@@ -99,6 +104,7 @@ def init_parallel_optimization(np: int = 1, ncores: int = 1, **kwargs):
     for name in kwargs["names"]:
         jobs.put(name)
 
+    _log.info("Start Bayessian-Optimization Process")
     for _ in range(np):
         process = multiprocessing.Process(
             target=lambda x, y: parallel_worker(x, y, **kwargs), args=(ncores, jobs)
@@ -308,21 +314,21 @@ def experiment_optimization(
     model = comsol.set_configuration(model, comsol_cfg)
     polyno, samples, results = sensitivity.evaluate_models(model, sens_cfg)
 
-    print(f"Paramer: {idx} -> BO Loop: {bo_iter}")
     try:
         time, evaluations = sensitivity.curate_none_evaluations(results, samples)
     except ValueError as error:
-        print(error)
+        _log.info(f"ERROR: Paramer: {idx} -> BO Loop: {bo_iter} ({error})")
         bo_iter += 1
         return 0.0
 
     try:
         evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
     except ValueError as error:
-        print(error)
+        _log.info(f"ERROR: Paramer: {idx} -> BO Loop: {bo_iter} ({error})")
         bo_iter += 1
         return 0.0
 
+    _log.info(f"SUCCESS: Paramer: {idx} -> BO Loop: {bo_iter}")
     sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
 
     # Save surrogate for the current iteration
