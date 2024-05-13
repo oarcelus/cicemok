@@ -97,12 +97,12 @@ def parameter_dependency(sobol: np.ndarray) -> np.ndarray:
 
 
 def init_parallel_optimization(np: int = 1, ncores: int = 1, **kwargs):
-    assert "names" in kwargs
-    assert np <= len(kwargs["names"])
+    assert "idxs" in kwargs
+    assert np <= len(kwargs["idxs"])
 
     jobs = multiprocessing.Queue()
-    for name in kwargs["names"]:
-        jobs.put(name)
+    for idx in kwargs["idxs"]:
+        jobs.put(idx)
 
     _log.info("Start Bayessian-Optimization Process")
     for _ in range(np):
@@ -127,6 +127,7 @@ def parallel_worker(
     maxrate: float,
     filename: str,
     names: list[str],
+    idxs: list[int],
     expression: list[str],
     units: list[str],
     database: str,
@@ -184,13 +185,12 @@ def parallel_worker(
     bounds = {"dynamics": dynamics, "isoc": isoc, "rate": rate, "texp": texp}
     while True:
         try:
-            name = jobs.get(block=False)
+            idx = jobs.get(block=False)
         except queue.Empty:
             break
 
-        assert name in names
+        assert idx in idxs
 
-        idx = names.index(name)
         bo_iter = 0
         optimizer = BayesianOptimization(
             f=experiment_optimization, pbounds=bounds, verbose=2
@@ -218,6 +218,7 @@ def init_experiment_optimization(
     maxrate: float,
     filename: str,
     names: list[str],
+    idxs: list[int],
     expression: list[str],
     units: list[str],
     database: str,
@@ -273,7 +274,7 @@ def init_experiment_optimization(
 
     # Set Bayessian Optimizer for each target parameter
     bounds = {"dynamics": dynamics, "isoc": isoc, "rate": rate, "texp": texp}
-    for idx in range(len(names)):
+    for idx in idxs:
         bo_iter = 0
         optimizer = BayesianOptimization(
             f=experiment_optimization, pbounds=bounds, verbose=2

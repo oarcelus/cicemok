@@ -1,4 +1,0 @@
-C_rate 3 "Discharge C rate"
-I_1C Capacity/1[h] "1C discharge current"
-Iapp I_1C*C_rate "Applied current with C rate"
-tstep 0.0005/C_rate ""

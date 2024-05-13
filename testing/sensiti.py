@@ -26,6 +26,7 @@ def main():
         maxrate=2.0,
         filename="./comsol_models/nib_withsoc.mph",
         names=["Ds_p", "Ds_n", "k_p", "k_n"],#, "R_n", "R_p"],
+        idxs=[0, 1, 2, 3],
         expression=["t", "liion.phis0_ec1"],
         units=["m^2/s", "m^2/s", "m/s", "m/s"],#, "um", "um"],
         database="Study 1//Solution 1",
