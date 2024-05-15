@@ -100,7 +100,7 @@ def parameter_dependency(sobol: np.ndarray) -> np.ndarray:
     return np.sum(1.0 - np.sum(sobol, axis=0))
 
 
-def init_parallel_optimization_params(np: int = 1, ncores: int = 1, **kwargs):
+def init_pool_parallel_optimization(np: int = 1, npool: int = 1, ncores: int = 1, **kwargs):
     assert "idxs" in kwargs
     assert np <= len(kwargs["idxs"])
 
@@ -108,111 +108,17 @@ def init_parallel_optimization_params(np: int = 1, ncores: int = 1, **kwargs):
     for idx in kwargs["idxs"]:
         jobs.put(idx)
 
-    logging.info("Start Bayessian-Optimization Process")
     for _ in range(np):
         process = multiprocessing.Process(
-            target=lambda x, y: parallel_worker(x, y, **kwargs), args=(ncores, jobs)
+            target=lambda x, y, z: parallel_pool_worker(x, y, z, **kwargs), args=(npool, ncores, jobs)
         )
         process.start()
 
 
-def parallel_worker(
+def parallel_pool_worker(
+    npool: int,
     ncores: int,
     jobs: multiprocessing.Queue,
-    dynamics: tuple[float, float],
-    isoc: tuple[float, float],
-    rate: tuple[float, float],
-    texp: tuple[float, float],
-    rmax: float,
-    dt: float,
-    minsoc: float,
-    maxsoc: float,
-    minrate: float,
-    maxrate: float,
-    filename: str,
-    names: list[str],
-    idxs: list[int],
-    expression: list[str],
-    units: list[str],
-    database: str,
-    evname: str,
-    isocname: str,
-    order: int,
-    distribution: cp.J,
-    rule: str,
-    kind: str,
-    kappa_decay: float,
-    kappa_decay_delay: int,
-    init_points: int,
-    n_iter: int,
-    log_name: str,
-):
-    global experiment_cfg
-    global model
-    global comsol_cfg
-    global sens_cfg
-    global idx
-    global bo_iter
-
-    # Start Comsol Client
-    client = comsol.start_client(cores=ncores)
-
-    # Open COMSOL model
-    model = comsol.load_model(client, filename)
-
-    # Build Experiment
-    experiment_cfg = ExperimentConfiguration(
-        rmax=rmax,
-        dt=dt,
-        minsoc=minsoc,
-        maxsoc=maxsoc,
-        minrate=minrate,
-        maxrate=maxrate,
-    )
-
-    # Build Comsol Config
-    comsol_cfg = ComsolConfiguration(
-        names=names,
-        filename=filename,
-        expression=expression,
-        unit=units,
-        database=database,
-        evname=evname,
-        isocname=isocname,
-    )
-
-    # Build Sensititvity Config
-    sens_cfg = SensitivityConfiguration(
-        order=order, distribution=distribution, rule=rule, config=comsol_cfg
-    )
-
-    # Set Bayessian Optimizer for each target parameter
-    bounds = {"dynamics": dynamics, "isoc": isoc, "rate": rate, "texp": texp}
-    while True:
-        try:
-            idx = jobs.get(block=False)
-        except queue.Empty:
-            break
-
-        assert idx in idxs
-
-        bo_iter = 0
-        optimizer = BayesianOptimization(
-            f=experiment_optimization, pbounds=bounds, verbose=2
-        )
-        acquisition = UtilityFunction(
-            kind=kind, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
-        )
-        logger = JSONLogger(path=f"{log_name}_param{idx}logging")
-        optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
-        optimizer.maximize(
-            init_points=init_points, n_iter=n_iter, acquisition_function=acquisition
-        )
-
-
-def init_pool_optimization_comsol(
-    np: int,
-    ncores: int,
     dynamics: tuple[float, float],
     isoc: tuple[float, float],
     rate: tuple[float, float],
@@ -277,7 +183,7 @@ def init_pool_optimization_comsol(
     # Start Computing Processes for COMSOL
     init_event = multiprocessing.Event()
     pool = multiprocessing.Pool(
-        processes=np,
+        processes=npool,
         initializer=sensitivity.setup_comsol_worker,
         initargs=(ncores, sens_cfg, init_event),
     )
@@ -286,7 +192,14 @@ def init_pool_optimization_comsol(
 
         # Set Bayessian Optimizer for each target parameter
         bounds = {"dynamics": dynamics, "isoc": isoc, "rate": rate, "texp": texp}
-        for idx in idxs:
+        while True:
+            try:
+                idx = jobs.get(block=False)
+            except queue.Empty:
+                break
+
+            assert idx in idxs
+
             bo_iter = 0
             optimizer = BayesianOptimization(
                 f=pool_experiment_optimization, pbounds=bounds, verbose=2
@@ -299,6 +212,7 @@ def init_pool_optimization_comsol(
             optimizer.maximize(
                 init_points=init_points, n_iter=n_iter, acquisition_function=acquisition
             )
+
     finally:
         pool.close()
         pool.join()

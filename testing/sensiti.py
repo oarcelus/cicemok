@@ -1,8 +1,7 @@
 import chaospy as cp
 from cicemok.ode import (
     init_experiment_optimization,
-    init_parallel_optimization_params,
-    init_pool_optimization_comsol,
+    init_pool_parallel_optimization,
 )
 
 
@@ -16,8 +15,9 @@ def main():
         # cp.Uniform(0.1, 4.0),
     )
 
-    init_pool_optimization_comsol(
-        np=4,
+    init_pool_parallel_optimization(
+        np=2,
+        npool=2,
         ncores=1,
         dynamics=(0.0, 1.0),
         isoc=(0.0, 1.0),

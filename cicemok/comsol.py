@@ -69,7 +69,10 @@ def set_timesteps(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     assert config.experiment is not None
     assert config.experiment.experiment is not None
 
-    dt = config.experiment.texp / 1000
+    dt = config.experiment.texp / config.experiment.experiment.shape[0] / 6
+    if int(config.experiment.texp / dt) < 100: 
+        dt = config.experiment.texp / 100
+    
     model.java.study("std1").feature("time").set("tunit", "s")
     model.java.study("std1").feature("time").set("tlist", f"range(0,{dt},{config.experiment.texp})")
 
