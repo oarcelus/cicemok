@@ -122,12 +122,15 @@ def evaluate_models_pool(pool, config: SensitivityConfiguration):
     return polyno, samples, results
 
 
-def setup_comsol_worker(ncores: int, config: SensitivityConfiguration, event: multiprocessing.Event):
+def setup_comsol_worker(
+    ncores: int, config: SensitivityConfiguration, event: multiprocessing.Event
+):
     global model
 
     client = comsol.start_client(cores=ncores)
     model = client.load(config.config.filename)
     event.set()
+
 
 def comsol_worker_pool(sample: np.ndarray, config: SensitivityConfiguration):
     global model
@@ -136,25 +139,6 @@ def comsol_worker_pool(sample: np.ndarray, config: SensitivityConfiguration):
     result = comsol.run_comsol_model(sample, model, config.config)
 
     return result
-
-
-def comsol_worker(
-    jobs: multiprocessing.Queue,
-    results: multiprocessing.Queue,
-    ncores: int,
-    config: SensitivityConfiguration,
-):
-    client = comsol.start_client(cores=ncores)
-    model: mph.Model = client.load(config.config.filename)
-    while True:
-        sample = jobs.get()
-        if sample is None:
-            break
-
-        model = comsol.set_configuration(model, config.config)
-        result = comsol.run_comsol_model(sample, model, config.config)
-
-        results.put((sample, result))
 
 
 def get_sobol(
