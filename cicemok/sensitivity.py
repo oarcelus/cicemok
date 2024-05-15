@@ -88,29 +88,6 @@ def evaluate_models(model: mph.Model, config: SensitivityConfiguration):
     return polyno, samples, results
 
 
-def evaluate_models_parallel(
-    jobs: multiprocessing.Queue,
-    results: multiprocessing.Queue,
-    config: SensitivityConfiguration,
-):
-    polyno = generate_polynomials(config)
-    samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
-    for sample in samples.T:
-        jobs.put(sample)
-
-    samples_out = []
-    results_out = []
-    while len(samples_out) < polyno.shape[0]:
-        try:
-            (sample, result) = results.get(timeout=1)
-            samples_out.append(sample)
-            results_out.append(result)
-        except queue.Empty:
-            pass
-
-    return polyno, np.array(samples_out, dtype=float).T, results_out
-
-
 def evaluate_models_pool(pool, config: SensitivityConfiguration):
     polyno = generate_polynomials(config)
     samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
