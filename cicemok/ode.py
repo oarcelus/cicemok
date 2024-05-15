@@ -5,12 +5,10 @@ import pickle
 import queue
 
 import chaospy as cp
-import matplotlib.pyplot as plt
 import numpy as np
 from bayes_opt import BayesianOptimization, UtilityFunction
 from bayes_opt.event import Events
 from bayes_opt.logger import JSONLogger
-from bayes_opt.util import load_logs
 
 from cicemok import comsol, ode, sensitivity
 from cicemok.configuration import (
@@ -21,7 +19,14 @@ from cicemok.configuration import (
 
 
 logging.getLogger(__name__)
-logging.basicConfig(filename=os.path.join(os.getcwd(), "ode.log"), encoding="utf-8", force=True)
+logging.basicConfig(
+    filename=os.path.join(os.getcwd(), "ode.log"),
+    encoding="utf-8",
+    force=True,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 
 def generate_experiment(config: ExperimentConfiguration) -> np.ndarray:
     assert (
@@ -271,7 +276,11 @@ def init_pool_optimization_comsol(
 
     # Start Computing Processes for COMSOL
     init_event = multiprocessing.Event()
-    pool = multiprocessing.Pool(processes=np, initializer=sensitivity.setup_comsol_worker, initargs=(ncores, sens_cfg, init_event))
+    pool = multiprocessing.Pool(
+        processes=np,
+        initializer=sensitivity.setup_comsol_worker,
+        initargs=(ncores, sens_cfg, init_event),
+    )
     try:
         init_event.wait()
 
@@ -407,19 +416,21 @@ def pool_experiment_optimization(
     try:
         time, evaluations = sensitivity.curate_none_evaluations(evals, samples)
     except ValueError as error:
-        logging.error(f"Paramer: {idx} -> BO Loop: {bo_iter} ({error})")
+        logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
         bo_iter += 1
         return 0.0
 
     try:
         evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
     except ValueError as error:
-        logging.error(f"Paramer: {idx} -> BO Loop: {bo_iter} ({error})")
+        logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
         bo_iter += 1
         return 0.0
 
-    logging.info(f"SUCCESS: Paramer: {idx} -> BO Loop: {bo_iter}")
+    logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
+    logging.info(f"SURRROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
     sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
+    logging.info(f"SURRROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
 
     # Save surrogate for the current iteration
     with open(f"surrogate_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
