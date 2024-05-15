@@ -95,7 +95,7 @@ def parameter_dependency(sobol: np.ndarray) -> np.ndarray:
     return np.sum(1.0 - np.sum(sobol, axis=0))
 
 
-def init_parallel_optimization(np: int = 1, ncores: int = 1, **kwargs):
+def init_parallel_optimization_params(np: int = 1, ncores: int = 1, **kwargs):
     assert "idxs" in kwargs
     assert np <= len(kwargs["idxs"])
 
@@ -168,6 +168,7 @@ def parallel_worker(
     # Build Comsol Config
     comsol_cfg = ComsolConfiguration(
         names=names,
+        filename=filename,
         expression=expression,
         unit=units,
         database=database,
@@ -202,6 +203,96 @@ def parallel_worker(
         optimizer.maximize(
             init_points=init_points, n_iter=n_iter, acquisition_function=acquisition
         )
+
+
+def init_pool_optimization_comsol(
+    np: int,
+    ncores: int,
+    dynamics: tuple[float, float],
+    isoc: tuple[float, float],
+    rate: tuple[float, float],
+    texp: tuple[float, float],
+    rmax: float,
+    dt: float,
+    minsoc: float,
+    maxsoc: float,
+    minrate: float,
+    maxrate: float,
+    filename: str,
+    names: list[str],
+    idxs: list[int],
+    expression: list[str],
+    units: list[str],
+    database: str,
+    evname: str,
+    isocname: str,
+    order: int,
+    distribution: cp.J,
+    rule: str,
+    kind: str,
+    kappa_decay: float,
+    kappa_decay_delay: int,
+    init_points: int,
+    n_iter: int,
+    log_name: str,
+):
+    global experiment_cfg
+    global pool
+    global comsol_cfg
+    global sens_cfg
+    global idx
+    global bo_iter
+
+    # Build Experiment
+    experiment_cfg = ExperimentConfiguration(
+        rmax=rmax,
+        dt=dt,
+        minsoc=minsoc,
+        maxsoc=maxsoc,
+        minrate=minrate,
+        maxrate=maxrate,
+    )
+
+    # Build Comsol Config
+    comsol_cfg = ComsolConfiguration(
+        names=names,
+        filename=filename,
+        expression=expression,
+        unit=units,
+        database=database,
+        evname=evname,
+        isocname=isocname,
+    )
+
+    # Build Sensititvity Config
+    sens_cfg = SensitivityConfiguration(
+        order=order, distribution=distribution, rule=rule, config=comsol_cfg
+    )
+
+    # Start Computing Processes for COMSOL
+    init_event = multiprocessing.Event()
+    pool = multiprocessing.Pool(processes=np, initializer=sensitivity.setup_comsol_worker, initargs=(ncores, sens_cfg, init_event))
+    try:
+        init_event.wait()
+
+        # Set Bayessian Optimizer for each target parameter
+        bounds = {"dynamics": dynamics, "isoc": isoc, "rate": rate, "texp": texp}
+        for idx in idxs:
+            bo_iter = 0
+            optimizer = BayesianOptimization(
+                f=pool_experiment_optimization, pbounds=bounds, verbose=2
+            )
+            acquisition = UtilityFunction(
+                kind=kind, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
+            )
+            logger = JSONLogger(path=f"{log_name}_param{idx}logging")
+            optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
+            optimizer.maximize(
+                init_points=init_points, n_iter=n_iter, acquisition_function=acquisition
+            )
+    finally:
+        pool.close()
+        pool.join()
 
 
 def init_experiment_optimization(
@@ -259,6 +350,7 @@ def init_experiment_optimization(
     # Build Comsol Config
     comsol_cfg = ComsolConfiguration(
         names=names,
+        filename=filename,
         expression=expression,
         unit=units,
         database=database,
@@ -286,6 +378,59 @@ def init_experiment_optimization(
         optimizer.maximize(
             init_points=init_points, n_iter=n_iter, acquisition_function=acquisition
         )
+
+
+def pool_experiment_optimization(
+    dynamics: float,
+    isoc: float,
+    rate: float,
+    texp: float,
+):
+    global experiment_cfg
+    global pool
+    global comsol_cfg
+    global sens_cfg
+    global idx
+    global bo_iter
+
+    experiment_cfg.dynamics = dynamics
+    experiment_cfg.isoc = isoc
+    experiment_cfg.rate = rate
+    experiment_cfg.texp = texp
+
+    experiment = ode.generate_experiment(experiment_cfg)
+    experiment_cfg.experiment = ode.postprocess_experiment(experiment, experiment_cfg)
+    comsol_cfg.experiment = experiment_cfg
+    sens_cfg.config = comsol_cfg
+
+    polyno, samples, evals = sensitivity.evaluate_models_pool(pool, sens_cfg)
+    try:
+        time, evaluations = sensitivity.curate_none_evaluations(evals, samples)
+    except ValueError as error:
+        logging.error(f"Paramer: {idx} -> BO Loop: {bo_iter} ({error})")
+        bo_iter += 1
+        return 0.0
+
+    try:
+        evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
+    except ValueError as error:
+        logging.error(f"Paramer: {idx} -> BO Loop: {bo_iter} ({error})")
+        bo_iter += 1
+        return 0.0
+
+    logging.info(f"SUCCESS: Paramer: {idx} -> BO Loop: {bo_iter}")
+    sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
+
+    # Save surrogate for the current iteration
+    with open(f"surrogate_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(surrogate, file)
+
+    # Save experiment for the current iteration
+    with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(experiment, file)
+
+    bo_iter += 1
+    return np.mean(sobol[idx, :])
 
 
 def experiment_optimization(

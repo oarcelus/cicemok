@@ -20,6 +20,7 @@ class ExperimentConfiguration:
 @dataclasses.dataclass
 class ComsolConfiguration:
     names: list[str]
+    filename: str
     expression: list[str]
     unit: list[str]
     database: str

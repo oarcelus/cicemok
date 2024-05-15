@@ -1,5 +1,10 @@
 import chaospy as cp
-from cicemok.ode import init_experiment_optimization, init_parallel_optimization
+from cicemok.ode import (
+    init_experiment_optimization,
+    init_parallel_optimization_params,
+    init_pool_optimization_comsol,
+)
+
 
 def main():
     distribution = cp.J(
@@ -7,11 +12,11 @@ def main():
         cp.Uniform(1e-18, 1e-14),
         cp.Uniform(1e-13, 1e-9),
         cp.Uniform(1e-13, 1e-9),
-        #cp.Uniform(1.0, 10.0),
-        #cp.Uniform(0.1, 4.0),
+        # cp.Uniform(1.0, 10.0),
+        # cp.Uniform(0.1, 4.0),
     )
 
-    init_parallel_optimization(
+    init_pool_optimization_comsol(
         np=4,
         ncores=1,
         dynamics=(0.0, 1.0),
@@ -25,10 +30,10 @@ def main():
         minrate=0.02,
         maxrate=2.0,
         filename="./comsol_models/nib_withsoc.mph",
-        names=["Ds_p", "Ds_n", "k_p", "k_n"],#, "R_n", "R_p"],
+        names=["Ds_p", "Ds_n", "k_p", "k_n"],  # , "R_n", "R_p"],
         idxs=[0, 1, 2, 3],
         expression=["t", "liion.phis0_ec1"],
-        units=["m^2/s", "m^2/s", "m/s", "m/s"],#, "um", "um"],
+        units=["m^2/s", "m^2/s", "m/s", "m/s"],  # , "um", "um"],
         database="Study 1//Solution 1",
         evname="C_rate",
         isocname="isoc",
@@ -46,4 +51,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

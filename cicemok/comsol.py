@@ -5,6 +5,7 @@ from cicemok.configuration import ComsolConfiguration
 
 
 def start_client(cores: Optional[int] = None) -> mph.Client:
+    mph.option(name="session", value="stand-alone")
     if cores is None:
         client: mph.Client = mph.start()
     else:

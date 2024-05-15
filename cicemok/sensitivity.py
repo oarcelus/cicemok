@@ -1,9 +1,13 @@
+import multiprocessing
+import queue
+from functools import partial
+
 import chaospy as cp
 import mph
 import numpy as np
-from cicemok.configuration import SensitivityConfiguration
 
 from cicemok import comsol
+from cicemok.configuration import SensitivityConfiguration
 
 
 def generate_polynomials(config: SensitivityConfiguration):
@@ -17,8 +21,8 @@ def curate_none_evaluations(
 
     if len(idxs) == len(evaluations):
         raise ValueError("All samples failed. Returning 0 to BO")
-    
-    if float(len(idxs))/len(evaluations) > 0.2:
+
+    if float(len(idxs)) / len(evaluations) > 0.2:
         raise ValueError("More than 20% of runs failed. Returning 0 to BO")
 
     count = 0
@@ -45,15 +49,14 @@ def curate_none_evaluations(
 def curate_cutoff_evaluations(
     evaluations: list[np.ndarray], samples: np.ndarray
 ) -> list[np.ndarray]:
-    # Check if there are more than one item with the max shape
     maxim = max([val.shape[0] for val in evaluations])
     coincidence = [i for i, val in enumerate(evaluations) if val.shape[0] == maxim]
     idxs = [i for i, val in enumerate(evaluations) if val.shape[0] < maxim]
 
     if len(coincidence) < 2:
         raise ValueError("All samples reached cutoff ahead of time. Returning 0 to BO")
-    
-    if float(len(idxs))/len(evaluations) > 0.2:
+
+    if float(len(idxs)) / len(evaluations) > 0.2:
         raise ValueError("More than 20% of runs failed. Returning 0 to BO")
 
     count = 0
@@ -83,6 +86,75 @@ def evaluate_models(model: mph.Model, config: SensitivityConfiguration):
     ]
 
     return polyno, samples, results
+
+
+def evaluate_models_parallel(
+    jobs: multiprocessing.Queue,
+    results: multiprocessing.Queue,
+    config: SensitivityConfiguration,
+):
+    polyno = generate_polynomials(config)
+    samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
+    for sample in samples.T:
+        jobs.put(sample)
+
+    samples_out = []
+    results_out = []
+    while len(samples_out) < polyno.shape[0]:
+        try:
+            (sample, result) = results.get(timeout=1)
+            samples_out.append(sample)
+            results_out.append(result)
+        except queue.Empty:
+            pass
+
+    return polyno, np.array(samples_out, dtype=float).T, results_out
+
+
+def evaluate_models_pool(pool, config: SensitivityConfiguration):
+    polyno = generate_polynomials(config)
+    samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
+    samples_pool = [sample for sample in samples.T]
+
+    func = partial(comsol_worker_pool, config=config)
+    results = pool.map(func, samples_pool)
+
+    return polyno, samples, results
+
+
+def setup_comsol_worker(ncores: int, config: SensitivityConfiguration, event: multiprocessing.Event):
+    global model
+
+    client = comsol.start_client(cores=ncores)
+    model = client.load(config.config.filename)
+    event.set()
+
+def comsol_worker_pool(sample: np.ndarray, config: SensitivityConfiguration):
+    global model
+
+    model = comsol.set_configuration(model, config.config)
+    result = comsol.run_comsol_model(sample, model, config.config)
+
+    return result
+
+
+def comsol_worker(
+    jobs: multiprocessing.Queue,
+    results: multiprocessing.Queue,
+    ncores: int,
+    config: SensitivityConfiguration,
+):
+    client = comsol.start_client(cores=ncores)
+    model: mph.Model = client.load(config.config.filename)
+    while True:
+        sample = jobs.get()
+        if sample is None:
+            break
+
+        model = comsol.set_configuration(model, config.config)
+        result = comsol.run_comsol_model(sample, model, config.config)
+
+        results.put((sample, result))
 
 
 def get_sobol(
