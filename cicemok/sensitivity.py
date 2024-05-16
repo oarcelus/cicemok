@@ -7,7 +7,11 @@ import mph
 import numpy as np
 
 from cicemok import comsol
-from cicemok.configuration import SensitivityConfiguration
+from cicemok.configuration import (
+    EvaluationConfiguration,
+    SensitivityConfiguration,
+    ComsolConfiguration,
+)
 
 
 def generate_polynomials(config: SensitivityConfiguration):
@@ -99,17 +103,27 @@ def evaluate_models_pool(pool, config: SensitivityConfiguration):
     return polyno, samples, results
 
 
+def evaluate_mc_pool(pool, nsample: int, config: EvaluationConfiguration):
+    samples = config.distribution.sample(nsample, rule=config.rule)
+    samples_pool = [sample for sample in samples.T]
+
+    func = partial(comsol_worker_pool, config=config)
+    results = pool.map(func, samples_pool)
+
+    return samples, results
+
+
 def setup_comsol_worker(
-    ncores: int, config: SensitivityConfiguration, event: multiprocessing.Event
+    ncores: int, config: ComsolConfiguration, event: multiprocessing.Event
 ):
     global model
 
     client = comsol.start_client(cores=ncores)
-    model = client.load(config.config.filename)
+    model = client.load(config.filename)
     event.set()
 
 
-def comsol_worker_pool(sample: np.ndarray, config: SensitivityConfiguration):
+def comsol_worker_pool(sample: np.ndarray, config: EvaluationConfiguration):
     global model
 
     model = comsol.set_configuration(model, config.config)
@@ -121,8 +135,8 @@ def comsol_worker_pool(sample: np.ndarray, config: SensitivityConfiguration):
 def get_sobol(
     polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
 ) -> tuple[np.ndarray, np.ndarray]:
+
     surrogate = cp.fit_regression(polyno, samples, evals)
     sobol = cp.Sens_m(surrogate, config.distribution)
 
-    assert isinstance(surrogate, np.ndarray)
     return (sobol, surrogate)

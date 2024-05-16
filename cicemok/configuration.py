@@ -30,9 +30,13 @@ class ComsolConfiguration:
 
 
 @dataclasses.dataclass
-class SensitivityConfiguration:
-    order: int
+class EvaluationConfiguration:
     distribution: cp.J
     rule: str
     config: ComsolConfiguration
+
+
+@dataclasses.dataclass
+class SensitivityConfiguration(EvaluationConfiguration):
+    order: int
     

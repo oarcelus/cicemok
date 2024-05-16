@@ -14,6 +14,7 @@ from cicemok import comsol, ode, sensitivity
 from cicemok.configuration import (
     ComsolConfiguration,
     ExperimentConfiguration,
+    EvaluationConfiguration,
     SensitivityConfiguration,
 )
 
@@ -100,7 +101,9 @@ def parameter_dependency(sobol: np.ndarray) -> np.ndarray:
     return np.sum(1.0 - np.sum(sobol, axis=0))
 
 
-def init_pool_parallel_optimization(np: int = 1, npool: int = 1, ncores: int = 1, **kwargs):
+def init_pool_parallel_optimization(
+    np: int = 1, npool: int = 1, ncores: int = 1, **kwargs
+):
     assert "idxs" in kwargs
     assert np <= len(kwargs["idxs"])
 
@@ -110,7 +113,8 @@ def init_pool_parallel_optimization(np: int = 1, npool: int = 1, ncores: int = 1
 
     for _ in range(np):
         process = multiprocessing.Process(
-            target=lambda x, y, z: parallel_pool_worker(x, y, z, **kwargs), args=(npool, ncores, jobs)
+            target=lambda x, y, z: parallel_pool_worker(x, y, z, **kwargs),
+            args=(npool, ncores, jobs),
         )
         process.start()
 
@@ -185,7 +189,7 @@ def parallel_pool_worker(
     pool = multiprocessing.Pool(
         processes=npool,
         initializer=sensitivity.setup_comsol_worker,
-        initargs=(ncores, sens_cfg, init_event),
+        initargs=(ncores, comsol_cfg, init_event),
     )
     try:
         init_event.wait()
@@ -342,17 +346,21 @@ def pool_experiment_optimization(
         return 0.0
 
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
-    logging.info(f"SURRROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
+    logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
     sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
-    logging.info(f"SURRROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
+    logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
 
     # Save surrogate for the current iteration
     with open(f"surrogate_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
-        pickle.dump(surrogate, file)
+        pickle.dump([time, surrogate], file)
 
     # Save experiment for the current iteration
     with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
-        pickle.dump(experiment, file)
+        pickle.dump(experiment_cfg, file)
+
+    # Save sobol indices of the full time series
+    with open(f"sobol_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(sobol, file)
 
     bo_iter += 1
     return np.mean(sobol[idx, :])
@@ -399,15 +407,124 @@ def experiment_optimization(
         return 0.0
 
     logging.info(f"SUCCESS: Paramer: {idx} -> BO Loop: {bo_iter}")
+    logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
     sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
+    logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
 
     # Save surrogate for the current iteration
     with open(f"surrogate_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
-        pickle.dump(surrogate, file)
+        pickle.dump([time, surrogate], file)
 
     # Save experiment for the current iteration
     with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
-        pickle.dump(experiment, file)
+        pickle.dump(experiment_cfg, file)
+
+    # Save sobol indices of the full time series
+    with open(f"sobol_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(sobol, file)
 
     bo_iter += 1
     return np.mean(sobol[idx, :])
+
+
+def get_surrogate_samples(filenames_surrogate: list[str], **kwargs):
+    assert len(filenames_surrogate) == len(kwargs["filenames_experiment"]) # Must correspond
+
+    samples, results = run_parallel_mc_samples(**kwargs)
+    data = []
+    for i, filename_surrogate in enumerate(filenames_surrogate):
+        with open(filename_surrogate, "rb") as file:
+            values: list = pickle.load(file)
+
+        time_surrogate = values[0]
+        volt_surrogate = values[1]
+
+        try:
+            time, evaluations = sensitivity.curate_none_evaluations(results[i], samples[i])
+        except ValueError as error:
+            logging.error(f"{error}")
+            return
+
+        try:
+            evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples[i])
+        except ValueError as error:
+            logging.error(f"{error}")
+            return
+
+        volt_surrogate = [volt_surrogate(*sample) for sample in samples[i].T]
+        volt_surrogate = [
+            np.interp(time, time_surrogate, volt) for volt in volt_surrogate
+        ]
+
+        data.append([time, evaluations, volt_surrogate])
+    
+    # Save sobol indices of the full time series
+    with open("surrogate_evaluations.pkl", "wb") as file:
+        pickle.dump(data, file)
+
+    return data
+
+
+def run_parallel_mc_samples(
+    npool: int,
+    ncores: int,
+    nsamples: int,
+    filenames_experiment: list[str],
+    filename_comsol: str,
+    names: list[str],
+    idxs: list[int],
+    expression: list[str],
+    units: list[str],
+    database: str,
+    evname: str,
+    isocname: str,
+    distribution: cp.J,
+    rule: str,
+):
+    # Build Comsol Config
+    comsol_cfg = ComsolConfiguration(
+        names=names,
+        filename=filename_comsol,
+        expression=expression,
+        unit=units,
+        database=database,
+        evname=evname,
+        isocname=isocname,
+    )
+
+    # Start Computing Processes for COMSOL
+    init_event = multiprocessing.Event()
+    pool = multiprocessing.Pool(
+        processes=npool,
+        initializer=sensitivity.setup_comsol_worker,
+        initargs=(ncores, comsol_cfg, init_event),
+    )
+
+    try:
+        init_event.wait()
+        sample_params = []
+        evals_params = []
+        for filename_experiment in filenames_experiment:
+            with open(filename_experiment, "rb") as file:
+                experiment_cfg: ExperimentConfiguration = pickle.load(file)
+
+            comsol_cfg.experiment = experiment_cfg
+
+            # Build Sensititvity Config
+            eval_cfg = EvaluationConfiguration(
+                distribution=distribution, rule=rule, config=comsol_cfg
+            )
+
+            logging.info(
+                f"EVALUATE: MC Samples -> START -> Experiment: {filename_experiment}"
+            )
+            samples, evals = sensitivity.evaluate_mc_pool(pool, nsamples, eval_cfg)
+            logging.info("EVALUATE: MC Samples -> END")
+            sample_params.append(samples)
+            evals_params.append(evals)
+
+    finally:
+        pool.close()
+        pool.join()
+
+    return sample_params, evals_params
