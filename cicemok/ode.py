@@ -146,6 +146,7 @@ def parallel_pool_worker(
     method: str,
     rule: str,
     kind: str,
+    kappa: float,
     kappa_decay: float,
     kappa_decay_delay: int,
     init_points: int,
@@ -162,7 +163,7 @@ def parallel_pool_worker(
     if method == "point_collocation":
         pool_experiment_optimization = pool_experiment_optimization_pc
     elif method == "pseudo_spectral":
-        pool_experiment_optimization = None
+        pool_experiment_optimization = pool_experiment_optimization_ps
     else:
         raise ValueError("Method not implemented")
 
@@ -217,7 +218,7 @@ def parallel_pool_worker(
                 f=pool_experiment_optimization, pbounds=bounds, verbose=2
             )
             acquisition = UtilityFunction(
-                kind=kind, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
+                kind=kind, kappa=kappa, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
             )
             logger = JSONLogger(path=f"{log_name}_param{idx}logging")
             optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
@@ -253,6 +254,7 @@ def init_experiment_optimization(
     distribution: cp.J,
     rule: str,
     kind: str,
+    kappa: float,
     kappa_decay: float,
     kappa_decay_delay: int,
     init_points: int,
@@ -306,7 +308,7 @@ def init_experiment_optimization(
             f=experiment_optimization, pbounds=bounds, verbose=2
         )
         acquisition = UtilityFunction(
-            kind=kind, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
+            kind=kind, kappa=kappa, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
         )
         logger = JSONLogger(path=f"{log_name}_param{idx}logging")
         optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)

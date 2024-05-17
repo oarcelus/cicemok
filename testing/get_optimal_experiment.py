@@ -42,6 +42,7 @@ def main():
         method="point_collocation",
         rule="latin_hypercube",
         kind="ucb",
+        kappa=10.0,
         kappa_decay=1.0,
         kappa_decay_delay=0,
         init_points=1,
