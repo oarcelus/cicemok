@@ -102,7 +102,7 @@ def evaluate_models_pool(pool, polyno, config: SensitivityConfiguration):
 
 
 def evaluate_ps_pool(pool, config: SensitivityConfiguration):
-    samples, weights = cp.generate_quadrature(config.order, config.distribution, rule=config.rule)
+    samples, weights = cp.generate_quadrature(config.order, config.distribution, rule=config.rule, sparse=True)
     samples_pool = [sample for sample in samples.T]
 
     func = partial(comsol_worker_pool, config=config)
