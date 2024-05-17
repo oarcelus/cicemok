@@ -143,6 +143,7 @@ def parallel_pool_worker(
     isocname: str,
     order: int,
     distribution: cp.J,
+    method: str,
     rule: str,
     kind: str,
     kappa_decay: float,
@@ -157,6 +158,13 @@ def parallel_pool_worker(
     global sens_cfg
     global idx
     global bo_iter
+
+    if method == "point_collocation":
+        pool_experiment_optimization = pool_experiment_optimization_pc
+    elif method == "pseudo_spectral":
+        pool_experiment_optimization = None
+    else:
+        raise ValueError("Method not implemented")
 
     # Build Experiment
     experiment_cfg = ExperimentConfiguration(
@@ -307,7 +315,7 @@ def init_experiment_optimization(
         )
 
 
-def pool_experiment_optimization(
+def pool_experiment_optimization_ps( 
     dynamics: float,
     isoc: float,
     rate: float,
@@ -330,7 +338,68 @@ def pool_experiment_optimization(
     comsol_cfg.experiment = experiment_cfg
     sens_cfg.config = comsol_cfg
 
-    polyno, samples, evals = sensitivity.evaluate_models_pool(pool, sens_cfg)
+    polyno = sensitivity.generate_polynomials(sens_cfg)
+    samples, weights, evals = sensitivity.evaluate_ps_pool(pool, sens_cfg)
+    try:
+        time, evaluations = sensitivity.curate_none_evaluations(evals, samples)
+    except ValueError as error:
+        logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
+        bo_iter += 1
+        return 0.0
+
+    try:
+        evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
+    except ValueError as error:
+        logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
+        bo_iter += 1
+        return 0.0
+
+    logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
+    logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
+    sobol, surrogate = sensitivity.get_sobol_ps(polyno, samples, weights, evaluations, sens_cfg)
+    logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
+
+    # Save surrogate for the current iteration
+    with open(f"surrogate_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump([time, surrogate], file)
+
+    # Save experiment for the current iteration
+    with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(experiment_cfg, file)
+
+    # Save sobol indices of the full time series
+    with open(f"sobol_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(sobol, file)
+
+    bo_iter += 1
+    return np.mean(sobol[idx, :])
+
+
+def pool_experiment_optimization_pc( 
+    dynamics: float,
+    isoc: float,
+    rate: float,
+    texp: float,
+):
+    global experiment_cfg
+    global pool
+    global comsol_cfg
+    global sens_cfg
+    global idx
+    global bo_iter
+
+    experiment_cfg.dynamics = dynamics
+    experiment_cfg.isoc = isoc
+    experiment_cfg.rate = rate
+    experiment_cfg.texp = texp
+
+    experiment = ode.generate_experiment(experiment_cfg)
+    experiment_cfg.experiment = ode.postprocess_experiment(experiment, experiment_cfg)
+    comsol_cfg.experiment = experiment_cfg
+    sens_cfg.config = comsol_cfg
+
+    polyno = sensitivity.generate_polynomials(sens_cfg)
+    samples, evals = sensitivity.evaluate_models_pool(pool, polyno, sens_cfg)
     try:
         time, evaluations = sensitivity.curate_none_evaluations(evals, samples)
     except ValueError as error:

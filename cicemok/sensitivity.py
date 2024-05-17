@@ -1,5 +1,4 @@
 import multiprocessing
-import queue
 from functools import partial
 
 import chaospy as cp
@@ -92,15 +91,24 @@ def evaluate_models(model: mph.Model, config: SensitivityConfiguration):
     return polyno, samples, results
 
 
-def evaluate_models_pool(pool, config: SensitivityConfiguration):
-    polyno = generate_polynomials(config)
+def evaluate_models_pool(pool, polyno, config: SensitivityConfiguration):
     samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
     samples_pool = [sample for sample in samples.T]
 
     func = partial(comsol_worker_pool, config=config)
     results = pool.map(func, samples_pool)
 
-    return polyno, samples, results
+    return samples, results
+
+
+def evaluate_ps_pool(pool, config: SensitivityConfiguration):
+    samples, weights = cp.generate_quadrature(config.order, config.distribution, rule=config.rule)
+    samples_pool = [sample for sample in samples.T]
+
+    func = partial(comsol_worker_pool, config=config)
+    results = pool.map(func, samples_pool)
+
+    return samples, weights, results
 
 
 def evaluate_mc_pool(pool, nsample: int, config: EvaluationConfiguration):
@@ -131,6 +139,15 @@ def comsol_worker_pool(sample: np.ndarray, config: EvaluationConfiguration):
 
     return result
 
+
+def get_sobol_ps(
+    polyno, samples, weights, evals: list[np.ndarray], config: SensitivityConfiguration
+) -> tuple[np.ndarray, np.ndarray]:
+
+    surrogate = cp.fit_quadrature(polyno, samples, weights, evals)
+    sobol = cp.Sens_m(surrogate, config.distribution)
+
+    return (sobol, surrogate)
 
 def get_sobol(
     polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
