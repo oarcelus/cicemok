@@ -2,14 +2,22 @@ import dataclasses
 import numpy as np
 import chaospy as cp
 
+
 @dataclasses.dataclass
-class ExperimentConfiguration:
-    rmax: float
-    dt: float
-    minsoc: float
-    maxsoc: float
-    minrate: float
-    maxrate: float
+class CurrentConfigurations:
+    isoc: float
+    texp: float
+    experiment: np.ndarray | None = None
+
+
+@dataclasses.dataclass
+class ExperimentConfiguration(CurrentConfigurations):
+    rmax: float | None = None 
+    dt: float | None = None
+    minsoc: float | None = None
+    maxsoc: float | None = None
+    minrate: float | None = None
+    maxrate: float | None = None
     dynamics: float = 0.0
     rate: float = 0.0
     isoc: float = 0.0
@@ -25,8 +33,8 @@ class ComsolConfiguration:
     unit: list[str]
     database: str
     evname: str
-    isocname: str
-    experiment: ExperimentConfiguration | None = None
+    isocname: str 
+    experiment: CurrentConfigurations | None = None
 
 
 @dataclasses.dataclass

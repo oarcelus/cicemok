@@ -220,7 +220,7 @@ def parallel_pool_worker(
             acquisition = UtilityFunction(
                 kind=kind, kappa=kappa, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
             )
-            logger = JSONLogger(path=f"{log_name}_param{idx}logging")
+            logger = JSONLogger(path=f"{log_name}_param_{idx}")
             optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
             optimizer.maximize(
                 init_points=init_points, n_iter=n_iter, acquisition_function=acquisition
@@ -310,7 +310,7 @@ def init_experiment_optimization(
         acquisition = UtilityFunction(
             kind=kind, kappa=kappa, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
         )
-        logger = JSONLogger(path=f"{log_name}_param{idx}logging")
+        logger = JSONLogger(path=f"{log_name}_param_{idx}")
         optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
         optimizer.maximize(
             init_points=init_points, n_iter=n_iter, acquisition_function=acquisition
