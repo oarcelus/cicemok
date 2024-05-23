@@ -88,9 +88,14 @@ def set_soc(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     return model
 
 
-def run_comsol_model(input: np.ndarray, model: mph.Model, config: ComsolConfiguration) -> np.ndarray | None:
+def set_model_parameters(input: np.ndarray, model:mph.Model, config: ComsolConfiguration) -> mph.Model:
     parameters: dict[str, tuple[float, str]] = {k: (v, u) for k, u, v in zip(config.names, config.unit, input.tolist())}
     model = edit_model_parameters(model, parameters)
+
+    return model
+
+def run_comsol_model(input: np.ndarray, model: mph.Model, config: ComsolConfiguration) -> np.ndarray | None:
+    model = set_model_parameters(input, model, config)
     try:
         model.solve()
         result: np.ndarray = model.evaluate(config.expression, dataset=config.database)
