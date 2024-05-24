@@ -17,15 +17,36 @@ from cicemok.configuration import (
 )
 
 
+_history = []
+
+def find_closest_in_history(input: np.ndarray, scale: float) -> float:
+    if not _history:
+        return np.inf
+
+    iter_history = iter(_history)
+    distance = np.inf
+    f = 1e10
+    try:
+        while True:
+            distance, x, f = next((np.linalg.norm(input - x), x, f) for x, f in iter_history if np.linalg.norm(input - x) < distance)
+    except StopIteration:
+        pass
+    finally:
+        assert isinstance(f, float)
+        return f * scale
+
+
 def objective_function(
     input: np.ndarray,
     experiments: list[np.ndarray],
     model: mph.Model,
     configs: list[ComsolConfiguration],
     surrogates: list | None = None,
+    usehistory: bool = False,
 ) -> float | None:
     lstsq = 0.0
 
+    print(_history)
     if surrogates is None:
         assert all(len(val) == len(experiments) for val in [experiments, configs])
     else:
@@ -40,15 +61,24 @@ def objective_function(
         if result is not None:
             logging.info("SUCCESS: Successful COMSOL evaluations")
         else:
-            logging.info("CRASH: COMSOL Failed")
+            logging.info("CRASH: COMSOL Failed -> Checking options")
 
         if result is None and surrogates is None:
-            return np.inf
+            if usehistory:
+                logging.info("CRASH: Using history to estimate closest points")
+                return find_closest_in_history(input, 10.0) 
+            else:
+                raise ValueError("No Surrogates nor Optimization history provided, end this job now!")
 
         if result is None and surrogates is not None:
             if surrogates[idx] is None:
-                return np.inf
+                if usehistory:
+                    logging.info("CRASH: Using history to estimate closest points")
+                    return find_closest_in_history(input, 10.0) 
+                else:
+                    raise ValueError("No Surrogates nor Optimization history provided, end this job now!")
             else:
+                logging.info("CRASH: Using Surrogate to handle crash")
                 time = surrogates[idx][0]
                 evaluation = surrogates[idx][1](*input)
                 result = np.column_stack((time, evaluation))
@@ -59,7 +89,15 @@ def objective_function(
         evaluation = result[:, 1]
         experiment = np.interp(time, experiment[:, 0], experiment[:, 1])
 
+        fig = plt.figure()
+
+        plt.plot(time, evaluation)
+        plt.plot(time, experiment)
+        plt.show()
+
         lstsq += np.sum((evaluation - experiment) ** 2.0)  # type: ignore
+        
+    _history.append((input, lstsq))
 
     return lstsq  # type: ignore
 
@@ -140,6 +178,7 @@ def optimize_parameters_ode(
     rhoend: float = 1e-8,
     slowiter: float = 1e-8,
     maxfun: int = 100,
+    usehistory: bool = False
 ):
     logging.getLogger(__name__)
     logging.basicConfig(
@@ -151,9 +190,14 @@ def optimize_parameters_ode(
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    names_cfg = names
+    expression_cfg = expression
+    units_cfg = units
+
     indexes = get_most_sensitive(log_name)
     client = comsol.start_client(cores=ncores)
     model = client.load(filename_comsol)
+
     estimated = []
     while indexes:
         idx = indexes.pop()
@@ -171,12 +215,11 @@ def optimize_parameters_ode(
         with open(file_sobol, "rb") as f:
             sobol: np.ndarray = pickle.load(f)
 
-        print(ode)
         comsol_cfg = ComsolConfiguration(
-            names=names,
+            names=names_cfg,
             filename=filename_comsol,
-            expression=expression,
-            unit=units,
+            expression=expression_cfg,
+            unit=units_cfg,
             database=database,
             evname=evname,
             isocname=isocname,
@@ -217,7 +260,7 @@ def optimize_parameters_ode(
         soln = pybobyqa.solve(
             objective_function,
             input0,
-            args=(experiments, model, cfgs, surrs),
+            args=(experiments, model, cfgs, surrs, usehistory),
             bounds=tuple(bounds),
             do_logging=True,
             rhoend=rhoend,
@@ -232,9 +275,9 @@ def optimize_parameters_ode(
 
         model = comsol.set_model_parameters(soln.x, model, comsol_cfg)
 
-        name = names.pop(idx[0])
-        expression.pop(idx[0])
-        units.pop(idx[0])
+        name = names_cfg.pop(names_cfg.index(names[idx[0]]))
+        expression_cfg.pop(expression_cfg.index(expression[idx[0]]))
+        units_cfg.pop(units_cfg.index(units[idx[0]]))
         estimated.append(idx[0])
         logging.info(
             f"ESTIMATED: Parameters {' '.join([str(est) for est in estimated])} -> Last Parameter {name} -> X: {soln.x} F: {soln.f}"

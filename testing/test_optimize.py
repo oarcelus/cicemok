@@ -14,13 +14,6 @@ def main():
         "./surrogate_param3_boiter0.pkl",
     ]
 
-    bounds = [
-        np.array([1e-18, 1e-14]),
-        np.array([1e-18, 1e-14]),
-        np.array([1e-13, 1e-9]),
-        np.array([1e-13, 1e-9]),
-    ]
-
     lower = np.array([1e-18, 1e-18, 1e-13, 1e-13])
     upper = np.array([1e-14, 1e-14, 1e-9, 1e-9])
     bounds = (lower, upper)
@@ -49,12 +42,13 @@ def main():
         evname="C_rate",
         isocname="isoc",
         log_name="nib_log",
-        with_surrogate=True,
+        with_surrogate=False,
         global_opt=True,
         use_restarts=True,
         rhoend=1e-3,
         slowiter=1e-8,
-        maxfun=2,
+        maxfun=5,
+        usehistory=True,
     )
 
 
