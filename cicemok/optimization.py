@@ -1,4 +1,5 @@
 import chaospy as cp
+import dataclasses
 import logging
 import pickle
 import json
@@ -19,6 +20,7 @@ from cicemok.configuration import (
 
 _history = []
 
+
 def find_closest_in_history(input: np.ndarray, scale: float) -> float:
     if not _history:
         return np.inf
@@ -28,7 +30,11 @@ def find_closest_in_history(input: np.ndarray, scale: float) -> float:
     f = 1e10
     try:
         while True:
-            distance, x, f = next((np.linalg.norm(input - x), x, f) for x, f in iter_history if np.linalg.norm(input - x) < distance)
+            distance, x, f = next(
+                (np.linalg.norm(input - x), x, f)
+                for x, f in iter_history
+                if np.linalg.norm(input - x) < distance
+            )
     except StopIteration:
         pass
     finally:
@@ -46,7 +52,6 @@ def objective_function(
 ) -> float | None:
     lstsq = 0.0
 
-    print(_history)
     if surrogates is None:
         assert all(len(val) == len(experiments) for val in [experiments, configs])
     else:
@@ -66,17 +71,21 @@ def objective_function(
         if result is None and surrogates is None:
             if usehistory:
                 logging.info("CRASH: Using history to estimate closest points")
-                return find_closest_in_history(input, 10.0) 
+                return find_closest_in_history(input, 10.0)
             else:
-                raise ValueError("No Surrogates nor Optimization history provided, end this job now!")
+                raise ValueError(
+                    "No Surrogates nor Optimization history provided, end this job now!"
+                )
 
         if result is None and surrogates is not None:
             if surrogates[idx] is None:
                 if usehistory:
                     logging.info("CRASH: Using history to estimate closest points")
-                    return find_closest_in_history(input, 10.0) 
+                    return find_closest_in_history(input, 10.0)
                 else:
-                    raise ValueError("No Surrogates nor Optimization history provided, end this job now!")
+                    raise ValueError(
+                        "No Surrogates nor Optimization history provided, end this job now!"
+                    )
             else:
                 logging.info("CRASH: Using Surrogate to handle crash")
                 time = surrogates[idx][0]
@@ -89,14 +98,8 @@ def objective_function(
         evaluation = result[:, 1]
         experiment = np.interp(time, experiment[:, 0], experiment[:, 1])
 
-        fig = plt.figure()
-
-        plt.plot(time, evaluation)
-        plt.plot(time, experiment)
-        plt.show()
-
         lstsq += np.sum((evaluation - experiment) ** 2.0)  # type: ignore
-        
+
     _history.append((input, lstsq))
 
     return lstsq  # type: ignore
@@ -151,7 +154,7 @@ def check_noe(sobol: np.ndarray, estimated: list = []) -> int | None:
         idx1, mean1 = next(val for val in sortmean if val[0] not in estimated)
         idx2, mean2 = next(val for val in sortmean if val[0] not in estimated)
 
-        if mean1 / mean2 > 0.9:
+        if mean2 / mean1 > 0.9:
             return idx2
         else:
             return None
@@ -178,7 +181,7 @@ def optimize_parameters_ode(
     rhoend: float = 1e-8,
     slowiter: float = 1e-8,
     maxfun: int = 100,
-    usehistory: bool = False
+    usehistory: bool = False,
 ):
     logging.getLogger(__name__)
     logging.basicConfig(
@@ -190,9 +193,9 @@ def optimize_parameters_ode(
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    names_cfg = names
-    expression_cfg = expression
-    units_cfg = units
+    names_cfg = names.copy()
+    expression_cfg = expression.copy()
+    units_cfg = units.copy()
 
     indexes = get_most_sensitive(log_name)
     client = comsol.start_client(cores=ncores)
@@ -215,7 +218,7 @@ def optimize_parameters_ode(
         with open(file_sobol, "rb") as f:
             sobol: np.ndarray = pickle.load(f)
 
-        comsol_cfg = ComsolConfiguration(
+        comsol_cfg_ode = ComsolConfiguration(
             names=names_cfg,
             filename=filename_comsol,
             expression=expression_cfg,
@@ -228,8 +231,8 @@ def optimize_parameters_ode(
         ode_cfg = CurrentConfigurations(
             isoc=idx[3], texp=idx[2], experiment=ode.experiment
         )
-        comsol_cfg.experiment = ode_cfg
-        cfgs.append(comsol_cfg)
+        comsol_cfg_ode.experiment = ode_cfg
+        cfgs.append(comsol_cfg_ode)
         experiments.append(experiment[idx[0]].T)
         if with_surrogate:
             surrs.append(surrogate)
@@ -246,11 +249,12 @@ def optimize_parameters_ode(
             with open(file_noe_surr, "rb") as f:
                 noe_surr: list = pickle.load(f)
 
-            ode_cfg = CurrentConfigurations(
+            noe_cfg = CurrentConfigurations(
                 isoc=idx_noe[3], texp=idx_noe[2], experiment=noe.experiment
             )
-            comsol_cfg.experiment = ode_cfg
-            cfgs.append(comsol_cfg)
+            comsol_cfg_noe = dataclasses.replace(comsol_cfg_ode)
+            comsol_cfg_noe.experiment = noe_cfg
+            cfgs.append(comsol_cfg_noe)
             experiments.append(experiment[idx_noe[0]].T)
             if with_surrogate:
                 surrs.append(noe_surr)
@@ -273,10 +277,9 @@ def optimize_parameters_ode(
             },
         )
 
-        model = comsol.set_model_parameters(soln.x, model, comsol_cfg)
+        model = comsol.set_model_parameters(soln.x, model, comsol_cfg_ode)
 
         name = names_cfg.pop(names_cfg.index(names[idx[0]]))
-        expression_cfg.pop(expression_cfg.index(expression[idx[0]]))
         units_cfg.pop(units_cfg.index(units[idx[0]]))
         estimated.append(idx[0])
         logging.info(

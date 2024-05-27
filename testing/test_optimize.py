@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 def main():
     params = np.array([1e-17, 1e-15, 1e-12, 1e-10])
+    params0 = np.array([1e-15, 1e-15, 1e-10, 1e-10])
     surrogates = [
         "./surrogate_param0_boiter1.pkl",
         "./surrogate_param1_boiter1.pkl",
@@ -31,7 +32,7 @@ def main():
 
     optimize_parameters_ode(
         ncores=4,
-        input0=params,
+        input0=params0,
         experiment=experiment,
         bounds=bounds,
         filename_comsol="./comsol_models/nib_withsoc.mph",
