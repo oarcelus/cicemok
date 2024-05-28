@@ -1,4 +1,3 @@
-import multiprocessing
 from functools import partial
 
 import chaospy as cp
@@ -9,7 +8,6 @@ from cicemok import comsol
 from cicemok.configuration import (
     EvaluationConfiguration,
     SensitivityConfiguration,
-    ComsolConfiguration,
 )
 
 
@@ -95,7 +93,7 @@ def evaluate_models_pool(pool, polyno, config: SensitivityConfiguration):
     samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
     samples_pool = [sample for sample in samples.T]
 
-    func = partial(comsol_worker_pool, config=config.config)
+    func = partial(comsol.comsol_worker_pool, config=config.config)
     results = pool.map(func, samples_pool)
 
     return samples, results
@@ -105,7 +103,7 @@ def evaluate_ps_pool(pool, config: SensitivityConfiguration):
     samples, weights = cp.generate_quadrature(config.order, config.distribution, rule=config.rule, sparse=True)
     samples_pool = [sample for sample in samples.T]
 
-    func = partial(comsol_worker_pool, config=config.config)
+    func = partial(comsol.comsol_worker_pool, config=config.config)
     results = pool.map(func, samples_pool)
 
     return samples, weights, results
@@ -115,30 +113,10 @@ def evaluate_mc_pool(pool, nsample: int, config: EvaluationConfiguration):
     samples = config.distribution.sample(nsample, rule=config.rule)
     samples_pool = [sample for sample in samples.T]
 
-    func = partial(comsol_worker_pool, config=config.config)
+    func = partial(comsol.comsol_worker_pool, config=config.config)
     results = pool.map(func, samples_pool)
 
     return samples, results
-
-
-def setup_comsol_worker(
-    ncores: int, config: ComsolConfiguration, event: multiprocessing.Event
-):
-    global model
-
-    client = comsol.start_client(cores=ncores)
-    model = client.load(config.filename)
-    event.set()
-
-
-def comsol_worker_pool(sample: np.ndarray, config: ComsolConfiguration):
-    global model
-
-    model = comsol.set_configuration(model, config)
-    result = comsol.run_comsol_model(sample, model, config)
-
-    return result
-
 
 def get_sobol_ps(
     polyno, samples, weights, evals: list[np.ndarray], config: SensitivityConfiguration

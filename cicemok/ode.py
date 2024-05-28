@@ -46,7 +46,12 @@ def generate_experiment(config: ExperimentConfiguration) -> np.ndarray:
 
     samples = samples * chdch
 
-    return samples
+    dt = config.texp / n
+    time = np.arange(n) * dt
+
+    results = np.column_stack((time, samples))
+
+    return results
 
 
 def postprocess_experiment(
@@ -63,6 +68,9 @@ def postprocess_experiment(
     )
 
     dt = config.texp / samples.shape[0] / 3600.0
+
+    time = samples[:, 0]
+    samples = samples[:, 1]
 
     # 1)
     soc = config.isoc
@@ -84,7 +92,9 @@ def postprocess_experiment(
 
         soc += samples[i] * dt
 
-    return samples
+    results = np.column_stack((time, samples))
+
+    return results
 
 
 def total_shannon_entropy(sobol: np.ndarray) -> float:
@@ -197,7 +207,7 @@ def parallel_pool_worker(
     init_event = multiprocessing.Event()
     pool = multiprocessing.Pool(
         processes=npool,
-        initializer=sensitivity.setup_comsol_worker,
+        initializer=comsol.setup_comsol_worker,
         initargs=(ncores, comsol_cfg, init_event),
     )
     try:
@@ -544,7 +554,7 @@ def run_parallel_mc_samples(
     init_event = multiprocessing.Event()
     pool = multiprocessing.Pool(
         processes=npool,
-        initializer=sensitivity.setup_comsol_worker,
+        initializer=comsol.setup_comsol_worker,
         initargs=(ncores, comsol_cfg, init_event),
     )
 

@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 
 def main():
-    params = np.array([1e-17, 1e-15, 1e-12, 1e-10])
+    params = np.array([5e-15, 3e-15, 5e-11, 3e-11])
     params0 = np.array([1e-15, 1e-15, 1e-10, 1e-10])
     surrogates = [
         "./surrogate_param0_boiter1.pkl",
@@ -15,7 +15,7 @@ def main():
         "./surrogate_param3_boiter0.pkl",
     ]
 
-    lower = np.array([1e-18, 1e-18, 1e-13, 1e-13])
+    lower = np.array([1e-16, 1e-16, 1e-11, 1e-11])
     upper = np.array([1e-14, 1e-14, 1e-9, 1e-9])
     bounds = (lower, upper)
 
@@ -31,12 +31,13 @@ def main():
         experiment[i] = np.array([x, curve])
 
     optimize_parameters_ode(
-        ncores=4,
+        ncores=1,
         input0=params0,
         experiment=experiment,
         bounds=bounds,
         filename_comsol="./comsol_models/nib_withsoc.mph",
         names=["Ds_p", "Ds_n", "k_p", "k_n"],  # , "R_n", "R_p"],
+        idxs=[0, 1, 2, 3],
         expression=["t", "liion.phis0_ec1"],
         units=["m^2/s", "m^2/s", "m/s", "m/s"],  # , "um", "um"],
         database="Study 1//Solution 1",
@@ -50,6 +51,10 @@ def main():
         slowiter=1e-8,
         maxfun=5,
         usehistory=True,
+        use_pso=True,
+        pop_size=4,
+        npool=4,
+        n_gen=2,
     )
 
 
