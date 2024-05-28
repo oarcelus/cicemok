@@ -344,12 +344,6 @@ def pool_experiment_optimization_ps(
     samples, weights, evals = sensitivity.evaluate_ps_pool(pool, sens_cfg)
     try:
         time, evaluations = sensitivity.curate_none_evaluations(evals, samples)
-    except ValueError as error:
-        logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
-        bo_iter += 1
-        return 0.0
-
-    try:
         evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
     except ValueError as error:
         logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
@@ -404,12 +398,6 @@ def pool_experiment_optimization_pc(
     samples, evals = sensitivity.evaluate_models_pool(pool, polyno, sens_cfg)
     try:
         time, evaluations = sensitivity.curate_none_evaluations(evals, samples)
-    except ValueError as error:
-        logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
-        bo_iter += 1
-        return 0.0
-
-    try:
         evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
     except ValueError as error:
         logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
@@ -465,12 +453,6 @@ def experiment_optimization(
 
     try:
         time, evaluations = sensitivity.curate_none_evaluations(results, samples)
-    except ValueError as error:
-        logging.error(f"Paramer: {idx} -> BO Loop: {bo_iter} ({error})")
-        bo_iter += 1
-        return 0.0
-
-    try:
         evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
     except ValueError as error:
         logging.error(f"Paramer: {idx} -> BO Loop: {bo_iter} ({error})")
@@ -512,11 +494,6 @@ def get_surrogate_samples(filenames_surrogate: list[str], **kwargs):
 
         try:
             time, evaluations = sensitivity.curate_none_evaluations(results[i], samples[i])
-        except ValueError as error:
-            logging.error(f"{error}")
-            return
-
-        try:
             evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples[i])
         except ValueError as error:
             logging.error(f"{error}")

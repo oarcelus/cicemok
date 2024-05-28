@@ -1,24 +1,105 @@
-import chaospy as cp
 import dataclasses
-import logging
-import pickle
 import json
-from pathlib import Path
+import logging
+import multiprocessing
 import os
+import pickle
+from functools import partial
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import mph
 import numpy as np
 import pybobyqa
-import mph
-import matplotlib.pyplot as plt
+from pymoo.algorithms.soo.nonconvex.pso import PSO
+from pymoo.core.problem import Problem
+from pymoo.core.callback import Callback
+from pymoo.optimize import minimize
+from pymoo.termination import get_termination
 
-from cicemok import comsol
+from cicemok import comsol, sensitivity
 from cicemok.configuration import (
     ComsolConfiguration,
-    ExperimentConfiguration,
     CurrentConfigurations,
+    ExperimentConfiguration,
 )
 
-
 _history = []
+
+
+class ComsolCallback(Callback):
+    def __init__(self) -> None:
+        super().__init__()
+        self.xhist = []
+        self.fhist = []
+
+    def notify(self, algorithm):
+        x = algorithm.pop.get("X")
+        f = algorithm.pop.get("F")
+
+        idf = np.argmin(f)
+
+        self.xhist.append(x[idf, :])
+        self.fhist.append(f[idf])
+
+        logging.info(
+            f"PYMOO: Generation {algorithm.n_gen} -> X: {x[idf, :]} -> F: {f[idf]}"
+        )
+
+
+class ComsolProblem(Problem):
+    def __init__(self, **kwargs):
+        super().__init__(
+            n_var=-1, n_obj=1, n_ieq_constr=0, n_eq_constr=0, xl=None, xu=None, **kwargs
+        )
+
+        if "pool" in kwargs:
+            self._pool = kwargs["pool"]
+        else:
+            self._pool = None
+
+    def _evaluate(
+        self,
+        x,
+        out,
+        *args,
+        experiments: list[np.ndarray],
+        configs: list[ComsolConfiguration],
+        model: mph.Model | None = None,
+        **kwargs,
+    ):
+        objectives = []
+        for idx, (experiment, config) in enumerate(
+            zip(experiments, configs)
+        ):
+            if self._pool is None:
+                assert model is not None
+                results = [
+                    comsol.run_comsol_model(sample, model, config)
+                    for sample in x
+                ]
+            else:
+                func = partial(sensitivity.comsol_worker_pool, config=config)
+                results = self._pool.map(func, x)
+
+            try:
+                time, evaluations = sensitivity.curate_none_evaluations(results, x)
+                evaluations = sensitivity.curate_cutoff_evaluations(evaluations, x)
+                experiment = np.interp(time, experiment[:, 0], experiment[:, 1])
+
+                lstsq = [
+                    np.sum((evaluation - experiment) ** 2.0)
+                    for evaluation in evaluations
+                ]  # type: ignore
+                objectives.append(lstsq)
+
+            except ValueError as error:
+                logging.error(f"ERROR: {error}")
+                raise ValueError(
+                    "FATAL ERROR: We cannot continue too many evaluations failed in the given iteration"
+                )
+            finally:
+                out["F"] = np.column_stack(objectives)
 
 
 def find_closest_in_history(input: np.ndarray, scale: float) -> float:
@@ -42,7 +123,7 @@ def find_closest_in_history(input: np.ndarray, scale: float) -> float:
         return f * scale
 
 
-def objective_function(
+def objective_pybobyqa(
     input: np.ndarray,
     experiments: list[np.ndarray],
     model: mph.Model,
@@ -182,6 +263,10 @@ def optimize_parameters_ode(
     slowiter: float = 1e-8,
     maxfun: int = 100,
     usehistory: bool = False,
+    use_pso: bool = False,
+    pop_size: int = 25,
+    npool: int = 1,
+    n_gen: int = 1,
 ):
     logging.getLogger(__name__)
     logging.basicConfig(
@@ -198,8 +283,28 @@ def optimize_parameters_ode(
     units_cfg = units.copy()
 
     indexes = get_most_sensitive(log_name)
-    client = comsol.start_client(cores=ncores)
-    model = client.load(filename_comsol)
+
+    if use_pso and npool > 1:
+        comsol_cfg = ComsolConfiguration(
+            names=names_cfg,
+            filename=filename_comsol,
+            expression=expression_cfg,
+            unit=units_cfg,
+            database=database,
+            evname=evname,
+            isocname=isocname,
+        )
+
+        init_event = multiprocessing.Event()
+        pool = multiprocessing.Pool(
+            processes=npool,
+            initializer=sensitivity.setup_comsol_worker,
+            initargs=(ncores, comsol_cfg, init_event),
+        )
+        init_event.wait()
+    else:
+        client = comsol.start_client(cores=ncores)
+        model = client.load(filename_comsol)
 
     estimated = []
     while indexes:
@@ -261,27 +366,57 @@ def optimize_parameters_ode(
             else:
                 surrs.append(None)
 
-        soln = pybobyqa.solve(
-            objective_function,
-            input0,
-            args=(experiments, model, cfgs, surrs, usehistory),
-            bounds=tuple(bounds),
-            do_logging=True,
-            rhoend=rhoend,
-            seek_global_minimum=global_opt,
-            maxfun=maxfun,
-            scaling_within_bounds=True,
-            user_params={
-                "restarts.use_restarts": use_restarts,
-                "slow.thresh_for_slow": slowiter,
-            },
-        )
+        if use_pso:
+            if npool > 1:
+                problem = ComsolProblem(
+                    n_var=len(indexes),
+                    n_obj=len(experiments),
+                    xl=bounds[0],
+                    xu=bounds[1],
+                    pool=pool,  # type: ignore
+                )
+            else:
+                problem = ComsolProblem(
+                    n_var=len(indexes),
+                    n_obj=len(experiments),
+                    xl=bounds[0],
+                    xu=bounds[1],
+                )
 
-        model = comsol.set_model_parameters(soln.x, model, comsol_cfg_ode)
+            termination = get_termination("n_gen", n_gen)
+            callback = ComsolCallback()
+            algorithm = PSO(pop_size=pop_size)
+            soln = minimize(
+                problem, algorithm, termination, seed=1, callback=callback, verbose=True
+            )
+
+            x = soln.X
+            f = soln.F
+        else:
+            soln = pybobyqa.solve(
+                objective_pybobyqa,
+                input0,
+                args=(experiments, model, cfgs, surrs, usehistory),  # type: ignore
+                bounds=tuple(bounds),
+                do_logging=True,
+                rhoend=rhoend,
+                seek_global_minimum=global_opt,
+                maxfun=maxfun,
+                scaling_within_bounds=True,
+                user_params={
+                    "restarts.use_restarts": use_restarts,
+                    "slow.thresh_for_slow": slowiter,
+                },
+            )
+
+            x = soln.x
+            f = soln.f
+
+        model = comsol.set_model_parameters(x, model, comsol_cfg_ode)  # type: ignore
 
         name = names_cfg.pop(names_cfg.index(names[idx[0]]))
         units_cfg.pop(units_cfg.index(units[idx[0]]))
         estimated.append(idx[0])
         logging.info(
-            f"ESTIMATED: Parameters {' '.join([str(est) for est in estimated])} -> Last Parameter {name} -> X: {soln.x} F: {soln.f}"
+            f"ESTIMATED: Parameters {' '.join([str(est) for est in estimated])} -> Last Parameter {name} -> X: {x} F: {f}"
         )

@@ -23,10 +23,10 @@ def curate_none_evaluations(
     idxs = [i for i, val in enumerate(evaluations) if val is None]
 
     if len(idxs) == len(evaluations):
-        raise ValueError("All samples failed. Returning 0 to BO")
+        raise ValueError("All samples failed.")
 
     if float(len(idxs)) / len(evaluations) > 0.2:
-        raise ValueError("More than 20% of runs failed. Returning 0 to BO")
+        raise ValueError("More than 20% of runs failed.")
 
     count = 0
     while idxs:
@@ -57,10 +57,10 @@ def curate_cutoff_evaluations(
     idxs = [i for i, val in enumerate(evaluations) if val.shape[0] < maxim]
 
     if len(coincidence) < 2:
-        raise ValueError("All samples reached cutoff ahead of time. Returning 0 to BO")
+        raise ValueError("All samples reached cutoff ahead of time.")
 
     if float(len(idxs)) / len(evaluations) > 0.2:
-        raise ValueError("More than 20% of runs failed. Returning 0 to BO")
+        raise ValueError("More than 20% of runs failed.")
 
     count = 0
     while idxs:
@@ -95,7 +95,7 @@ def evaluate_models_pool(pool, polyno, config: SensitivityConfiguration):
     samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
     samples_pool = [sample for sample in samples.T]
 
-    func = partial(comsol_worker_pool, config=config)
+    func = partial(comsol_worker_pool, config=config.config)
     results = pool.map(func, samples_pool)
 
     return samples, results
@@ -105,7 +105,7 @@ def evaluate_ps_pool(pool, config: SensitivityConfiguration):
     samples, weights = cp.generate_quadrature(config.order, config.distribution, rule=config.rule, sparse=True)
     samples_pool = [sample for sample in samples.T]
 
-    func = partial(comsol_worker_pool, config=config)
+    func = partial(comsol_worker_pool, config=config.config)
     results = pool.map(func, samples_pool)
 
     return samples, weights, results
@@ -115,7 +115,7 @@ def evaluate_mc_pool(pool, nsample: int, config: EvaluationConfiguration):
     samples = config.distribution.sample(nsample, rule=config.rule)
     samples_pool = [sample for sample in samples.T]
 
-    func = partial(comsol_worker_pool, config=config)
+    func = partial(comsol_worker_pool, config=config.config)
     results = pool.map(func, samples_pool)
 
     return samples, results
@@ -131,11 +131,11 @@ def setup_comsol_worker(
     event.set()
 
 
-def comsol_worker_pool(sample: np.ndarray, config: EvaluationConfiguration):
+def comsol_worker_pool(sample: np.ndarray, config: ComsolConfiguration):
     global model
 
-    model = comsol.set_configuration(model, config.config)
-    result = comsol.run_comsol_model(sample, model, config.config)
+    model = comsol.set_configuration(model, config)
+    result = comsol.run_comsol_model(sample, model, config)
 
     return result
 
