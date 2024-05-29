@@ -261,8 +261,12 @@ def check_noe(sobol: np.ndarray, estimated: list = []) -> int | None:
 def optimize_parameters_multi_obj(
     npool: int,
     ncores: int,
+    n_gen: int,
+    pop_size: int,
     loads: list[np.ndarray],
     experiments: list[np.ndarray],
+    isocs: list[float],
+    texps: list[float],
     bounds: tuple[np.ndarray, np.ndarray],
     filename_comsol: str,
     names: list[str],
@@ -282,6 +286,9 @@ def optimize_parameters_multi_obj(
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    assert all(len(var) == len(loads) for var in [loads, experiments, isocs, texps])
+    assert all(len(var) == len(names) for var in bounds)
+
     comsol_cfg = ComsolConfiguration(
         names=names,
         filename=filename_comsol,
@@ -292,14 +299,72 @@ def optimize_parameters_multi_obj(
         isocname=isocname,
     )
 
-    init_event = multiprocessing.Event()
-    pool = multiprocessing.Pool(
-        processes=npool,
-        initializer=comsol.setup_comsol_worker,
-        initargs=(ncores, comsol_cfg, init_event),
-    )
-    init_event.wait()
+    if npool > 1:
+        init_event = multiprocessing.Event()
+        pool = multiprocessing.Pool(
+            processes=npool,
+            initializer=comsol.setup_comsol_worker,
+            initargs=(ncores, comsol_cfg, init_event),
+        )
+        init_event.wait()
+        model = None
+    else:
+        client = comsol.start_client(cores=ncores)
+        model = client.load(filename_comsol)
 
+    cfgs = []
+    for load, texp, isoc in zip(loads, texps, isocs):
+        current_cfg = CurrentConfigurations(isoc=isoc, texp=texp, experiment=load)
+        tmp_cfg = dataclasses.replace(comsol_cfg)
+        tmp_cfg.experiment = current_cfg
+        cfgs.append(tmp_cfg)
+
+    if npool > 1:
+        problem = ComsolProblem(
+            experiments,
+            cfgs,
+            None,
+            pool,  # type: ignore
+            n_var=len(names),
+            n_obj=len(experiments),
+            xl=bounds[0],
+            xu=bounds[1],
+        )
+    else:
+        problem = ComsolProblem(
+            experiments,
+            cfgs,
+            model,
+            None,
+            n_var=len(names),
+            n_obj=len(experiments),
+            xl=bounds[0],
+            xu=bounds[1],
+        )
+
+    termination = get_termination("n_gen", n_gen)
+    callback = ComsolCallback()
+    algorithm = PSO(pop_size=pop_size)
+    soln = minimize(
+        problem,
+        algorithm,
+        termination,
+        seed=3,
+        callback=callback,
+        verbose=False,
+        experiments=experiments,
+        configs=cfgs,
+        model=model,
+    )
+
+    x = soln.X
+
+    if npool > 1:
+        func = partial(comsol.set_model_parameters_pool, config=comsol_cfg)
+        pool.map(func, [x for _ in range(npool)])  # type: ignore
+    else:
+        model = comsol.set_model_parameters(x, model, comsol_cfg)  # type: ignore
+        model.save("./test.mph")
 
 def optimize_parameters_ode(
     ncores: int,

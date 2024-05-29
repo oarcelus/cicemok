@@ -1,8 +1,10 @@
 from functools import partial
 
 import chaospy as cp
+import gstools as gs
 import mph
 import numpy as np
+from sklearn.linear_model import LarsCV
 
 from cicemok import comsol
 from cicemok.configuration import (
@@ -11,8 +13,8 @@ from cicemok.configuration import (
 )
 
 
-def generate_polynomials(config: SensitivityConfiguration):
-    return cp.generate_expansion(config.order, config.distribution)
+def generate_polynomials(config: SensitivityConfiguration, normed: bool = False):
+    return cp.generate_expansion(config.order, config.distribution, normed=normed)
 
 
 def curate_none_evaluations(
@@ -100,7 +102,9 @@ def evaluate_models_pool(pool, polyno, config: SensitivityConfiguration):
 
 
 def evaluate_ps_pool(pool, config: SensitivityConfiguration):
-    samples, weights = cp.generate_quadrature(config.order, config.distribution, rule=config.rule, sparse=True)
+    samples, weights = cp.generate_quadrature(
+        config.order, config.distribution, rule=config.rule, sparse=True
+    )
     samples_pool = [sample for sample in samples.T]
 
     func = partial(comsol.comsol_worker_pool, config=config.config)
@@ -118,20 +122,40 @@ def evaluate_mc_pool(pool, nsample: int, config: EvaluationConfiguration):
 
     return samples, results
 
+
 def get_sobol_ps(
     polyno, samples, weights, evals: list[np.ndarray], config: SensitivityConfiguration
 ) -> tuple[np.ndarray, np.ndarray]:
-
     surrogate = cp.fit_quadrature(polyno, samples, weights, evals)
     sobol = cp.Sens_m(surrogate, config.distribution)
 
     return (sobol, surrogate)
 
+
 def get_sobol(
     polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
 ) -> tuple[np.ndarray, np.ndarray]:
-
     surrogate = cp.fit_regression(polyno, samples, evals)
+    sobol = cp.Sens_m(surrogate, config.distribution)
+
+    return (sobol, surrogate)
+
+
+def get_sobol_pck(
+    polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
+) -> tuple[np.ndarray, np.ndarray]:
+    # Fit evaluations using angular regression model
+    lars = LarsCV(fit_intercept=False, max_iter=1000)
+    surrogate, coeffs = cp.fit_regression(polyno, samples, evals, model=lars, retall=1)
+    
+    # Reduce polynomial pool by eliminating 0 fourier coefficients
+    _polyno = polyno[coeffs != 0]
+
+    # Plot histograms of evaluations
+    
+    # Fit variogram 
+
+    model = gs.Gaussian(dim=samples.shape[0], var=variance)
     sobol = cp.Sens_m(surrogate, config.distribution)
 
     return (sobol, surrogate)

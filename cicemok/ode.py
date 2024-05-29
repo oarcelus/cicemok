@@ -4,6 +4,7 @@ import os
 import pickle
 import queue
 
+import matplotlib.pyplot as plt
 import chaospy as cp
 import numpy as np
 from bayes_opt import BayesianOptimization, UtilityFunction
@@ -174,6 +175,8 @@ def parallel_pool_worker(
         pool_experiment_optimization = pool_experiment_optimization_pc
     elif method == "pseudo_spectral":
         pool_experiment_optimization = pool_experiment_optimization_ps
+    elif method == "pck":
+        pool_experiment_optimization = pool_experiment_optimization_pck
     else:
         raise ValueError("Method not implemented")
 
@@ -414,6 +417,67 @@ def pool_experiment_optimization_pc(
         bo_iter += 1
         return 0.0
 
+    logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
+    logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
+    sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
+    logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
+
+    # Save surrogate for the current iteration
+    with open(f"surrogate_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump([time, surrogate], file)
+
+    # Save experiment for the current iteration
+    with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(experiment_cfg, file)
+
+    # Save sobol indices of the full time series
+    with open(f"sobol_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(sobol, file)
+
+    bo_iter += 1
+    return np.mean(sobol[idx, :])
+
+
+def pool_experiment_optimization_pck( 
+    dynamics: float,
+    isoc: float,
+    rate: float,
+    texp: float,
+):
+    global experiment_cfg
+    global pool
+    global comsol_cfg
+    global sens_cfg
+    global idx
+    global bo_iter
+
+    experiment_cfg.dynamics = dynamics
+    experiment_cfg.isoc = isoc
+    experiment_cfg.rate = rate
+    experiment_cfg.texp = texp
+
+    experiment = ode.generate_experiment(experiment_cfg)
+    experiment_cfg.experiment = ode.postprocess_experiment(experiment, experiment_cfg)
+    comsol_cfg.experiment = experiment_cfg
+    sens_cfg.config = comsol_cfg
+
+    polyno = sensitivity.generate_polynomials(sens_cfg, normed=True)
+    samples, evals = sensitivity.evaluate_models_pool(pool, polyno, sens_cfg)
+    try:
+        time, evaluations = sensitivity.curate_none_evaluations(evals, samples)
+        evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
+    except ValueError as error:
+        logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
+        bo_iter += 1
+        return 0.0
+
+    fig = plt.figure()
+    arr = np.array(evaluations, dtype=float)
+
+    plt.hist(arr[:, 0], bins='auto')
+    plt.hist(arr[:, -1], bins='auto')
+    plt.hist(arr[:, 50], bins='auto')
+    plt.show()
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
     logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
     sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
