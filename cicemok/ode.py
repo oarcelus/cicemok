@@ -163,7 +163,6 @@ def parallel_pool_worker(
     init_points: int,
     n_iter: int,
     log_name: str,
-    threads_config: str,
 ):
     global experiment_cfg
     global pool
