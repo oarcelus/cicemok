@@ -471,16 +471,9 @@ def pool_experiment_optimization_pck(
         bo_iter += 1
         return 0.0
 
-    fig = plt.figure()
-    arr = np.array(evaluations, dtype=float)
-
-    plt.hist(arr[:, 0], bins='auto')
-    plt.hist(arr[:, -1], bins='auto')
-    plt.hist(arr[:, 50], bins='auto')
-    plt.show()
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
     logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
-    sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
+    sobol, surrogate = sensitivity.get_sobol_pck(polyno, samples, evaluations, sens_cfg)
     logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
 
     # Save surrogate for the current iteration

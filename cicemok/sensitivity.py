@@ -144,6 +144,13 @@ def get_sobol(
 def get_sobol_pck(
     polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
 ) -> tuple[np.ndarray, np.ndarray]:
+
+    # Normalize sample data within bounds
+    _samples = (samples - np.mean(samples, axis=1)) / np.std(samples, axis=1)
+    print(_samples)
+
+    # Fit variogram of the evaluations to a Gaussian Covariance Model
+
     # Fit evaluations using angular regression model
     lars = LarsCV(fit_intercept=False, max_iter=1000)
     surrogate, coeffs = cp.fit_regression(polyno, samples, evals, model=lars, retall=1)
@@ -151,8 +158,6 @@ def get_sobol_pck(
     # Reduce polynomial pool by eliminating 0 fourier coefficients
     _polyno = polyno[coeffs != 0]
 
-    # Plot histograms of evaluations
-    
     # Fit variogram 
 
     model = gs.Gaussian(dim=samples.shape[0], var=variance)
