@@ -163,6 +163,7 @@ def parallel_pool_worker(
     init_points: int,
     n_iter: int,
     log_name: str,
+    threads_config: str,
 ):
     global experiment_cfg
     global pool
@@ -170,6 +171,9 @@ def parallel_pool_worker(
     global sens_cfg
     global idx
     global bo_iter
+
+    import mkl
+    mkl.set_num_threads(npool*ncores) 
 
     if method == "point_collocation":
         pool_experiment_optimization = pool_experiment_optimization_pc

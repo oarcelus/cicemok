@@ -39,7 +39,7 @@ def main():
         isocname="isoc",
         order=1,
         distribution=distribution,
-        method="pck",
+        method="point_collocation",
         rule="latin_hypercube",
         kind="ucb",
         kappa=10.0,

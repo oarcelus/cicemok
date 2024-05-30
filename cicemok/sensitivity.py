@@ -1,4 +1,5 @@
 from functools import partial
+import os
 
 import chaospy as cp
 import gstools as gs
@@ -135,6 +136,8 @@ def get_sobol_ps(
 def get_sobol(
     polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
 ) -> tuple[np.ndarray, np.ndarray]:
+   
+    # Uses Least Squares regression to fit fourier coefficients of polynomials
     surrogate = cp.fit_regression(polyno, samples, evals)
     sobol = cp.Sens_m(surrogate, config.distribution)
 
@@ -146,7 +149,9 @@ def get_sobol_pck(
 ) -> tuple[np.ndarray, np.ndarray]:
 
     # Normalize sample data within bounds
-    _samples = (samples - np.mean(samples, axis=1)) / np.std(samples, axis=1)
+    up = config.distribution.upper
+    lo = config.distribution.lower
+    _samples = (samples.T - lo) / (up - lo)
     print(_samples)
 
     # Fit variogram of the evaluations to a Gaussian Covariance Model
