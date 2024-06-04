@@ -6,6 +6,7 @@ import gstools as gs
 import mph
 import numpy as np
 from sklearn.linear_model import LarsCV
+import matplotlib.pyplot as plt
 
 from cicemok import comsol
 from cicemok.configuration import (
@@ -152,9 +153,14 @@ def get_sobol_pck(
     up = config.distribution.upper
     lo = config.distribution.lower
     _samples = (samples.T - lo) / (up - lo)
-    print(_samples)
 
     # Fit variogram of the evaluations to a Gaussian Covariance Model
+    bin, gamma = gs.vario_estimate((var for var in _samples.T), evals)
+    gauss = gs.Gaussian(dim=samples.shape[0])
+    gauss.fit_variogram(bin, gamma)
+
+    ax = gauss.plot(x_max=max(bin))
+    ax.scatter(bin, gamma)
 
     # Fit evaluations using angular regression model
     lars = LarsCV(fit_intercept=False, max_iter=1000)
