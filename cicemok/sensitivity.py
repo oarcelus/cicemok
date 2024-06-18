@@ -93,8 +93,8 @@ def evaluate_models(model: mph.Model, config: SensitivityConfiguration):
     return polyno, samples, results
 
 
-def evaluate_models_pool(pool, polyno, config: SensitivityConfiguration):
-    samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
+def evaluate_models_pool(pool, nsample: int, config: SensitivityConfiguration):
+    samples = config.distribution.sample(nsample, rule=config.rule)
     samples_pool = [sample for sample in samples.T]
 
     func = partial(comsol.comsol_worker_pool, config=config.config)
