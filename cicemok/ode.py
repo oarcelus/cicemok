@@ -155,6 +155,7 @@ def parallel_pool_worker(
     order: int,
     distribution: cp.J,
     nsample: int,
+    gpce: bool,
     rule: str,
     kind: str,
     kappa: float,
@@ -173,6 +174,12 @@ def parallel_pool_worker(
     global nsamples
 
     nsamples = nsample
+
+    if gpce:
+        pool_experiment_optimization = pool_experiment_optimization_general_pce
+    else:
+        pool_experiment_optimization = pool_experiment_optimization_normal_pce
+
     # Build Experiment
     experiment_cfg = ExperimentConfiguration(
         rmax=rmax,
@@ -237,7 +244,70 @@ def parallel_pool_worker(
         pool.join()
 
 
-def pool_experiment_optimization( 
+def pool_experiment_optimization_general_pce( 
+    dynamics: float,
+    isoc: float,
+    rate: float,
+    texp: float,
+):
+    global experiment_cfg
+    global pool
+    global comsol_cfg
+    global sens_cfg
+    global idx
+    global bo_iter
+    global nsamples
+
+    experiment_cfg.dynamics = dynamics
+    experiment_cfg.isoc = isoc
+    experiment_cfg.rate = rate
+    experiment_cfg.texp = texp
+
+    experiment = ode.generate_experiment(experiment_cfg)
+    experiment_cfg.experiment = ode.postprocess_experiment(experiment, experiment_cfg)
+    comsol_cfg.experiment = experiment_cfg
+    sens_cfg.config = comsol_cfg
+
+    distribution_q = sens_cfg.distribution
+    distribution_r = cp.J(*[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])])
+
+    sens_cfg.distribution = distribution_r
+    polyno = sensitivity.generate_polynomials(sens_cfg)
+
+    samples_r = sens_cfg.distribution.sample(nsamples, rule=sens_cfg.rule)
+    samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
+
+    evals = sensitivity.evaluate_models_pool(pool, samples_q, comsol_cfg)
+    try:
+        time, evaluations = sensitivity.curate_none_evaluations(evals, samples_q)
+        evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples_q)
+    except ValueError as error:
+        logging.error(f"Parameter: {idx} -> BO Loop: {bo_iter} ({error})")
+        bo_iter += 1
+        return 0.0
+
+    logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
+    logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
+    sobol, surrogate = sensitivity.get_sobol(polyno, samples_r, evaluations, sens_cfg)
+    logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
+
+    # Save surrogate for the current iteration
+    with open(f"surrogate_gpce_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump([time, surrogate], file)
+
+    # Save experiment for the current iteration
+    with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(experiment_cfg, file)
+
+    # Save sobol indices of the full time series
+    with open(f"sobol_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(sobol, file)
+
+    bo_iter += 1
+    return np.mean(sobol[idx, :])
+
+
+def pool_experiment_optimization_normal_pce( 
     dynamics: float,
     isoc: float,
     rate: float,
@@ -262,7 +332,8 @@ def pool_experiment_optimization(
     sens_cfg.config = comsol_cfg
 
     polyno = sensitivity.generate_polynomials(sens_cfg)
-    samples, evals = sensitivity.evaluate_models_pool(pool, nsamples, sens_cfg)
+    samples = sens_cfg.distribution.sample(nsamples, rule=sens_cfg.rule)
+    evals = sensitivity.evaluate_models_pool(pool, samples, comsol_cfg)
     try:
         time, evaluations = sensitivity.curate_none_evaluations(evals, samples)
         evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples)
@@ -378,7 +449,8 @@ def run_parallel_mc_samples(
             logging.info(
                 f"EVALUATE: MC Samples -> START -> Experiment: {filename_experiment}"
             )
-            samples, evals = sensitivity.evaluate_mc_pool(pool, nsamples, eval_cfg)
+            samples = eval_cfg.distribution.sample(nsamples, rule=eval_cfg.rule)
+            evals = sensitivity.evaluate_models_pool(pool, samples, comsol_cfg)
             logging.info("EVALUATE: MC Samples -> END")
             sample_params.append(samples)
             evals_params.append(evals)

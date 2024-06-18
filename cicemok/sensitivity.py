@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from cicemok import comsol
 from cicemok.configuration import (
     EvaluationConfiguration,
+    ComsolConfiguration,
     SensitivityConfiguration,
 )
 
@@ -83,34 +84,13 @@ def curate_cutoff_evaluations(
     return evaluations
 
 
-def evaluate_models(model: mph.Model, config: SensitivityConfiguration):
-    polyno = generate_polynomials(config)
-    samples = config.distribution.sample(polyno.shape[0], rule=config.rule)
-    results = [
-        comsol.run_comsol_model(sample, model, config.config) for sample in samples.T
-    ]
-
-    return polyno, samples, results
-
-
-def evaluate_models_pool(pool, nsample: int, config: SensitivityConfiguration):
-    samples = config.distribution.sample(nsample, rule=config.rule)
+def evaluate_models_pool(pool, samples: np.ndarray, config: ComsolConfiguration):
     samples_pool = [sample for sample in samples.T]
 
-    func = partial(comsol.comsol_worker_pool, config=config.config)
+    func = partial(comsol.comsol_worker_pool, config=config)
     results = pool.map(func, samples_pool)
 
-    return samples, results
-
-
-def evaluate_mc_pool(pool, nsample: int, config: EvaluationConfiguration):
-    samples = config.distribution.sample(nsample, rule=config.rule)
-    samples_pool = [sample for sample in samples.T]
-
-    func = partial(comsol.comsol_worker_pool, config=config.config)
-    results = pool.map(func, samples_pool)
-
-    return samples, results
+    return results
 
 
 def get_sobol(
