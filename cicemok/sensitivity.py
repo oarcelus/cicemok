@@ -103,18 +103,6 @@ def evaluate_models_pool(pool, nsample: int, config: SensitivityConfiguration):
     return samples, results
 
 
-def evaluate_ps_pool(pool, config: SensitivityConfiguration):
-    samples, weights = cp.generate_quadrature(
-        config.order, config.distribution, rule=config.rule, sparse=True
-    )
-    samples_pool = [sample for sample in samples.T]
-
-    func = partial(comsol.comsol_worker_pool, config=config.config)
-    results = pool.map(func, samples_pool)
-
-    return samples, weights, results
-
-
 def evaluate_mc_pool(pool, nsample: int, config: EvaluationConfiguration):
     samples = config.distribution.sample(nsample, rule=config.rule)
     samples_pool = [sample for sample in samples.T]
@@ -123,15 +111,6 @@ def evaluate_mc_pool(pool, nsample: int, config: EvaluationConfiguration):
     results = pool.map(func, samples_pool)
 
     return samples, results
-
-
-def get_sobol_ps(
-    polyno, samples, weights, evals: list[np.ndarray], config: SensitivityConfiguration
-) -> tuple[np.ndarray, np.ndarray]:
-    surrogate = cp.fit_quadrature(polyno, samples, weights, evals)
-    sobol = cp.Sens_m(surrogate, config.distribution)
-
-    return (sobol, surrogate)
 
 
 def get_sobol(
