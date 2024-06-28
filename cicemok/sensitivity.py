@@ -1,23 +1,33 @@
-from functools import partial
 import os
+
+from datetime import datetime
+from functools import partial
+import matplotlib.pyplot as plt
 
 import chaospy as cp
 import gstools as gs
-import mph
-import numpy as np
-from sklearn.linear_model import LarsCV
 import matplotlib.pyplot as plt
+import mph
+import numpoly
+import numpy as np
+from sklearn.linear_model import Lars, LarsCV, LassoLars, LassoLarsCV
+from sklearn.model_selection import LeaveOneOut
 
 from cicemok import comsol
 from cicemok.configuration import (
-    EvaluationConfiguration,
     ComsolConfiguration,
     SensitivityConfiguration,
 )
 
 
-def generate_polynomials(config: SensitivityConfiguration, normed: bool = False):
-    return cp.generate_expansion(config.order, config.distribution, normed=normed)
+def generate_polynomials(config: SensitivityConfiguration):
+    return cp.generate_expansion(
+        config.order,
+        config.distribution,
+        normed=config.normed,
+        retall=config.retall,
+        cross_truncation=config.cross_truncation,
+    )
 
 
 def curate_none_evaluations(
@@ -93,21 +103,230 @@ def evaluate_models_pool(pool, samples: np.ndarray, config: ComsolConfiguration)
     return results
 
 
-def get_sobol(
-    polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
-) -> tuple[np.ndarray, np.ndarray]:
-   
-    # Uses Least Squares regression to fit fourier coefficients of polynomials
-    surrogate = cp.fit_regression(polyno, samples, evals)
-    sobol = cp.Sens_m(surrogate, config.distribution)
+def pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
+    polyno = generate_polynomials(config)
+    surrogate, fourier = cp.fit_regression(polyno, samples, evals, retall=True)
 
-    return (sobol, surrogate)
+    return polyno, fourier, surrogate
+
+
+def larscv_pq_pce(
+    samples,
+    evals: list[np.ndarray],
+    config: SensitivityConfiguration,
+):
+    """
+    samples: Experimental design. (nsamples, nfeatures)
+    evals: Model evaluations. (nsamples, ntargets)
+    config: SensitivityConfiguration class
+    """
+    evaluations = np.asarray(evals)
+    yhat = np.mean(evaluations, axis=0)
+    evaluations_ = evaluations - yhat
+    empvar = 1.0 / (evaluations.shape[1] - 1) * np.sum(evaluations_**2, axis=0)
+    dimension = len(config.distribution)
+    n = len(evals)
+    for p in range(config.minorder, config.order + 1):
+        for q in np.arange(0.5, 1, 0.1):
+            alpha = cp.glexindex(
+                start=0,
+                stop=p + 1,
+                dimensions=dimension,
+                cross_truncation=q,
+                graded=True,
+            )
+
+            polynomials = generate_expansion_from_alpha(alpha.T, config)
+            poly_evals = polynomials(*samples).T
+
+            # Experimental matrix diagonal
+            invATA = np.linalg.inv(np.matmul(poly_evals.T, poly_evals))
+            h = np.matmul(np.matmul(poly_evals, invATA), poly_evals.T).diagonal()
+            hi = 1.0 - h
+
+            # Correction factor
+            cemp = 1.0 / n * np.matmul(poly_evals.T, poly_evals)
+            tpn = (
+                float(n)
+                / (float(n) - float(len(polynomials)))
+                * (1.0 + np.trace(np.linalg.inv(cemp)) / float(n))
+            )
+
+            loo = LeaveOneOut()
+            larscv = LarsCV(fit_intercept=False, cv=loo, n_jobs=-1)
+            for i in range(n):
+                larscv.fit(poly_evals, evaluations[:, i])
+                print(larscv.mse_path_)
+                alpha_ = alpha[larscv.coef_ != 0]
+                polynomials_ = generate_expansion_from_alpha(alpha_.T, config)
+
+                surrogate, coef = cp.fit_regression(
+                    polynomials_, samples, evaluations[:, i], retall=True
+                )
+                hi = 1.0 - h
+                residual = (evaluations[:, i] - surrogate(*samples)) / hi
+                errloo = np.mean(residual**2)
+
+                eloo = errloo / empvar[i]
+
+
+def lars_pq_pce(
+    samples,
+    evals: list[np.ndarray],
+    config: SensitivityConfiguration,
+):
+    """
+    samples: Experimental design. (nsamples, nfeatures)
+    evals: Model evaluations. (nsamples, ntargets)
+    config: SensitivityConfiguration class
+    naive: False if LOO error is computed on the LAR path of each **ntarget** data point. True if only one point is computed
+    """
+
+    # Centering response data (this is so that there is no numerical issues with LARS pathing)
+    evaluations = np.asarray(evals)
+    yhat = np.mean(evaluations, axis=0)
+    evaluations_ = evaluations - yhat
+    var = np.var(evaluations, axis=0)
+    evaluations_ = evaluations_ / var
+
+    # Problem dimensions
+    dimension = len(config.distribution)
+    n = len(evals)
+
+    pq = []
+    pqeloo = []
+    pqcoeff = []
+    pqsurr = []
+    for p in range(config.minorder, config.order + 1):
+        for q in np.arange(0.5, 1, 0.1):
+            alpha = cp.glexindex(
+                start=0,
+                stop=p + 1,
+                dimensions=dimension,
+                cross_truncation=q,
+                graded=True,
+            ).T
+
+            polynomials = generate_expansion_from_alpha(alpha, config)
+            poly_evals = polynomials(*samples).T
+
+            # Experimental matrix diagonal
+            invATA = np.linalg.inv(np.matmul(poly_evals.T, poly_evals))
+            h = np.matmul(np.matmul(poly_evals, invATA), poly_evals.T).diagonal()
+            hi = 1.0 - h
+
+            # Correction factor
+            cemp = 1.0 / n * np.matmul(poly_evals.T, poly_evals)
+            tpn = (
+                float(n)
+                / (float(n) - float(len(polynomials)))
+                * (1.0 + np.trace(np.linalg.inv(cemp)) / float(n))
+            )
+
+            lars = Lars(fit_intercept=False, n_nonzero_coefs=n - 1)
+            lars.fit(poly_evals, evaluations_)
+
+            coeffs = np.asarray(lars.coef_path_)[:, :, 1:]
+            surrogates = numpoly.aspolynomial(
+                [
+                    numpoly.sum(polynomials * coeffs[:, :, idx], -1)
+                    for idx in range(coeffs.shape[2])
+                ]
+            )
+            
+            # LeaveOneOut cross validation
+            residual = (evaluations_.T - surrogates(*samples)) / hi
+            errloo = np.mean(residual**2, axis=2)
+            eloo = tpn * errloo
+            neloo = eloo/eloo[0, :] # I have to do this to normalize to 1, else numbers are HUGE (why not in UQLab?)
+
+            mineloo = np.min(neloo, axis=0)
+            idmin = np.argmin(neloo, axis=0)
+            idall = np.arange(idmin.shape[0])
+                
+            surrogate_mins = var * surrogates[idmin, idall] + yhat
+            
+            pq.append([p, q])
+            pqeloo.append(mineloo)
+            mincoeff = np.asarray([coeffs[i, :, idmin[i]] for i in idall]).T
+            mincoeff *= var
+            mincoeff[0, :] += yhat
+            pqcoeff.append(mincoeff)
+            pqsurr.append(surrogate_mins)
+
+    pqeloo = np.asarray(pqeloo)
+    mineloo = np.min(pqeloo, axis=0)
+    idxmin = np.argmin(pqeloo, axis=0)
+    
+    surrmin = numpoly.aspolynomial([pqsurr[idx] for idx in idxmin])
+    pqmin = np.asarray([pq[idx] for idx in idxmin])
+    pqcoeffmin = [pqcoeff[idx].T for idx in idxmin]
+
+    return surrmin, mineloo, pqcoeffmin, pqmin
+    
+
+def generate_expansion_from_alpha(alpha, config):
+    qs = cp.variable(len(config.distribution))
+    polyno = cp.prod(
+        [
+            cp.generate_expansion(config.order, config.distribution[idx], normed=True)[
+                alpha[idx]
+            ](**{"q0": qs[idx]})
+            for idx in range(len(config.distribution))
+        ],
+        axis=0,
+    )
+
+    return polyno
+
+
+def get_analytical_sobol(fourier, config: SensitivityConfiguration):
+    stop = config.order + 1
+    dimension = config.distribution.lower.shape[0]
+    trunc = config.cross_truncation
+
+    alpha = cp.glexindex(
+        start=0,
+        stop=stop,
+        dimensions=dimension,
+        cross_truncation=trunc,
+        graded=True,
+        reverse=True,
+    ).T
+
+    d_hat = np.sum(fourier[1:] ** 2, axis=0)
+
+    sens_t_hat = None
+    if config.sobol_total:
+        sens_t_hat = np.empty((dimension, d_hat.shape[0]))
+        for idx in range(dimension):
+            index = alpha[idx, :] > 0
+            sens_t_hat[idx, :] = np.sum(fourier[index] ** 2, axis=0) / d_hat
+
+    sens_m2_hat = None
+    if config.sobol_second:
+        sens_m2_hat = np.empty((dimension, dimension, d_hat.shape[0]))
+        for idx in range(dimension):
+            for jdx in range(dimension):
+                index = (
+                    (idx != jdx)
+                    & (alpha[idx, :] > 0)
+                    & (alpha[jdx, :] > 0)
+                    & (alpha.sum(0) == alpha[idx, :] + alpha[jdx, :])
+                )
+                sens_m2_hat[idx, jdx, :] = np.sum(fourier[index] ** 2, axis=0) / d_hat
+
+    sens_m_hat = np.empty((dimension, d_hat.shape[0]))
+    for idx in range(dimension):
+        index = (alpha[idx, :] > 0) & (alpha.sum(0) == alpha[idx, :])
+        sens_m_hat[idx] = np.sum(fourier[index] ** 2, axis=0) / d_hat
+
+    return sens_t_hat, sens_m2_hat, sens_m_hat
 
 
 def get_sobol_pck(
     polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
 ) -> tuple[np.ndarray, np.ndarray]:
-
     # Normalize sample data within bounds
     up = config.distribution.upper
     lo = config.distribution.lower
@@ -122,13 +341,13 @@ def get_sobol_pck(
     ax.scatter(bin, gamma)
 
     # Fit evaluations using angular regression model
-    lars = LarsCV(fit_intercept=False, max_iter=1000)
+    lars = Lars(fit_intercept=False, max_iter=1000)
     surrogate, coeffs = cp.fit_regression(polyno, samples, evals, model=lars, retall=1)
-    
+
     # Reduce polynomial pool by eliminating 0 fourier coefficients
     _polyno = polyno[coeffs != 0]
 
-    # Fit variogram 
+    # Fit variogram
 
     model = gs.Gaussian(dim=samples.shape[0], var=variance)
     sobol = cp.Sens_m(surrogate, config.distribution)

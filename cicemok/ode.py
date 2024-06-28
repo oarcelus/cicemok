@@ -15,7 +15,6 @@ from cicemok import comsol, ode, sensitivity
 from cicemok.configuration import (
     ComsolConfiguration,
     ExperimentConfiguration,
-    EvaluationConfiguration,
     SensitivityConfiguration,
 )
 
@@ -203,7 +202,7 @@ def parallel_pool_worker(
 
     # Build Sensititvity Config
     sens_cfg = SensitivityConfiguration(
-        order=order, distribution=distribution, rule=rule, config=comsol_cfg
+        order=order, distribution=distribution, rule=rule
     )
 
     # Start Computing Processes for COMSOL
@@ -231,7 +230,10 @@ def parallel_pool_worker(
                 f=pool_experiment_optimization, pbounds=bounds, verbose=2
             )
             acquisition = UtilityFunction(
-                kind=kind, kappa=kappa, kappa_decay=kappa_decay, kappa_decay_delay=kappa_decay_delay
+                kind=kind,
+                kappa=kappa,
+                kappa_decay=kappa_decay,
+                kappa_decay_delay=kappa_decay_delay,
             )
             logger = JSONLogger(path=f"{log_name}_param_{idx}")
             optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
@@ -244,7 +246,7 @@ def parallel_pool_worker(
         pool.join()
 
 
-def pool_experiment_optimization_general_pce( 
+def pool_experiment_optimization_general_pce(
     dynamics: float,
     isoc: float,
     rate: float,
@@ -266,13 +268,13 @@ def pool_experiment_optimization_general_pce(
     experiment = ode.generate_experiment(experiment_cfg)
     experiment_cfg.experiment = ode.postprocess_experiment(experiment, experiment_cfg)
     comsol_cfg.experiment = experiment_cfg
-    sens_cfg.config = comsol_cfg
 
     distribution_q = sens_cfg.distribution
-    distribution_r = cp.J(*[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])])
+    distribution_r = cp.J(
+        *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
+    )
 
     sens_cfg.distribution = distribution_r
-    polyno = sensitivity.generate_polynomials(sens_cfg)
 
     samples_r = sens_cfg.distribution.sample(nsamples, rule=sens_cfg.rule)
     samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
@@ -288,8 +290,17 @@ def pool_experiment_optimization_general_pce(
 
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
     logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
-    sobol, surrogate = sensitivity.get_sobol(polyno, samples_r, evaluations, sens_cfg)
+    polyno, fourier, surrogate = sensitivity.pce(
+        samples_r, evaluations, sens_cfg
+    )
     logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
+
+    # Save samples for the current iteration
+    with open(f"samples{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(samples_r, file)
+    # Save evals for the current iteration
+    with open(f"evaluations{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump([time, evaluations], file)
 
     # Save surrogate for the current iteration
     with open(f"surrogate_gpce_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
@@ -299,6 +310,20 @@ def pool_experiment_optimization_general_pce(
     with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
         pickle.dump(experiment_cfg, file)
 
+    logging.info(f"SOBOL: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
+    sobol_t, sobol_2, sobol = sensitivity.get_analytical_sobol(fourier, sens_cfg)
+    logging.info(f"SOBOL: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
+
+    if sobol_t:
+        # Save sobol indices of the full time series
+        with open(f"sobol_total_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+            pickle.dump(sobol_t, file)
+
+    if sobol_2:
+        # Save sobol indices of the full time series
+        with open(f"sobol_interaction_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+            pickle.dump(sobol_2, file)
+
     # Save sobol indices of the full time series
     with open(f"sobol_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
         pickle.dump(sobol, file)
@@ -307,7 +332,7 @@ def pool_experiment_optimization_general_pce(
     return np.mean(sobol[idx, :])
 
 
-def pool_experiment_optimization_normal_pce( 
+def pool_experiment_optimization_normal_pce(
     dynamics: float,
     isoc: float,
     rate: float,
@@ -329,7 +354,6 @@ def pool_experiment_optimization_normal_pce(
     experiment = ode.generate_experiment(experiment_cfg)
     experiment_cfg.experiment = ode.postprocess_experiment(experiment, experiment_cfg)
     comsol_cfg.experiment = experiment_cfg
-    sens_cfg.config = comsol_cfg
 
     polyno = sensitivity.generate_polynomials(sens_cfg)
     samples = sens_cfg.distribution.sample(nsamples, rule=sens_cfg.rule)
@@ -344,8 +368,18 @@ def pool_experiment_optimization_normal_pce(
 
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
     logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
-    sobol, surrogate = sensitivity.get_sobol(polyno, samples, evaluations, sens_cfg)
+    polyno, fourier, surrogate = sensitivity.pce(
+        samples, evaluations, sens_cfg
+    )
     logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
+
+
+    # Save samples for the current iteration
+    with open(f"samples{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump(samples, file)
+    # Save evals for the current iteration
+    with open(f"evaluations{idx}_boiter{bo_iter}.pkl", "wb") as file:
+        pickle.dump([time, evaluations], file)
 
     # Save surrogate for the current iteration
     with open(f"surrogate_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
@@ -354,6 +388,20 @@ def pool_experiment_optimization_normal_pce(
     # Save experiment for the current iteration
     with open(f"experiment_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
         pickle.dump(experiment_cfg, file)
+
+    logging.info(f"SOBOL: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
+    sobol_t, sobol_2, sobol = sensitivity.get_analytical_sobol(fourier, sens_cfg)
+    logging.info(f"SOBOL: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
+
+    if sobol_t:
+        # Save sobol indices of the full time series
+        with open(f"sobol_total_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+            pickle.dump(sobol_t, file)
+
+    if sobol_2:
+        # Save sobol indices of the full time series
+        with open(f"sobol_interaction_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
+            pickle.dump(sobol_2, file)
 
     # Save sobol indices of the full time series
     with open(f"sobol_param{idx}_boiter{bo_iter}.pkl", "wb") as file:
@@ -364,7 +412,9 @@ def pool_experiment_optimization_normal_pce(
 
 
 def get_surrogate_samples(filenames_surrogate: list[str], **kwargs):
-    assert len(filenames_surrogate) == len(kwargs["filenames_experiment"]) # Must correspond
+    assert len(filenames_surrogate) == len(
+        kwargs["filenames_experiment"]
+    )  # Must correspond
 
     samples, results = run_parallel_mc_samples(**kwargs)
     data = []
@@ -376,7 +426,9 @@ def get_surrogate_samples(filenames_surrogate: list[str], **kwargs):
         volt_surrogate = values[1]
 
         try:
-            time, evaluations = sensitivity.curate_none_evaluations(results[i], samples[i])
+            time, evaluations = sensitivity.curate_none_evaluations(
+                results[i], samples[i]
+            )
             evaluations = sensitivity.curate_cutoff_evaluations(evaluations, samples[i])
         except ValueError as error:
             logging.error(f"{error}")
@@ -388,7 +440,7 @@ def get_surrogate_samples(filenames_surrogate: list[str], **kwargs):
         ]
 
         data.append([time, evaluations, volt_surrogate])
-    
+
     # Save sobol indices of the full time series
     with open("surrogate_evaluations.pkl", "wb") as file:
         pickle.dump(data, file)
@@ -441,15 +493,10 @@ def run_parallel_mc_samples(
 
             comsol_cfg.experiment = experiment_cfg
 
-            # Build Sensititvity Config
-            eval_cfg = EvaluationConfiguration(
-                distribution=distribution, rule=rule, config=comsol_cfg
-            )
-
             logging.info(
                 f"EVALUATE: MC Samples -> START -> Experiment: {filename_experiment}"
             )
-            samples = eval_cfg.distribution.sample(nsamples, rule=eval_cfg.rule)
+            samples = distribution.sample(nsamples, rule=rule)
             evals = sensitivity.evaluate_models_pool(pool, samples, comsol_cfg)
             logging.info("EVALUATE: MC Samples -> END")
             sample_params.append(samples)

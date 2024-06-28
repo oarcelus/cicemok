@@ -1,6 +1,5 @@
 import chaospy as cp
 from cicemok.ode import (
-    init_experiment_optimization,
     init_pool_parallel_optimization,
 )
 
@@ -39,7 +38,8 @@ def main():
         isocname="isoc",
         order=1,
         distribution=distribution,
-        method="point_collocation",
+        nsample=10,
+        gpce=True,
         rule="latin_hypercube",
         kind="ucb",
         kappa=10.0,

@@ -5,24 +5,21 @@ import chaospy as cp
 
 @dataclasses.dataclass
 class CurrentConfigurations:
-    isoc: float
-    texp: float
+    isoc: float = 0.0
+    texp: float = 0.0
     experiment: np.ndarray | None = None
 
 
 @dataclasses.dataclass
 class ExperimentConfiguration(CurrentConfigurations):
-    rmax: float | None = None 
-    dt: float | None = None
-    minsoc: float | None = None
-    maxsoc: float | None = None
-    minrate: float | None = None
-    maxrate: float | None = None
+    rmax: float = 0.0 
+    dt: float = 0.0
+    minsoc: float = 0.0
+    maxsoc: float = 0.0
+    minrate: float = 0.0
+    maxrate: float = 0.0
     dynamics: float = 0.0
     rate: float = 0.0
-    isoc: float = 0.0
-    texp: float = 0.0
-    experiment: np.ndarray | None = None
 
 
 @dataclasses.dataclass
@@ -38,13 +35,14 @@ class ComsolConfiguration:
 
 
 @dataclasses.dataclass
-class EvaluationConfiguration:
+class SensitivityConfiguration:
     distribution: cp.J
-    rule: str
-    config: ComsolConfiguration
-
-
-@dataclasses.dataclass
-class SensitivityConfiguration(EvaluationConfiguration):
     order: int
+    rule: str = "latin_hypercube"
+    minorder: int = 1
+    cross_truncation: float = 1.0
+    retall: bool = False
+    normed: bool = True
+    sobol_total: bool = False
+    sobol_second: bool = False
     
