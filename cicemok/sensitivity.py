@@ -181,13 +181,12 @@ def lars_pq_pce(
     config: SensitivityConfiguration class
     naive: False if LOO error is computed on the LAR path of each **ntarget** data point. True if only one point is computed
     """
-
-    # Centering response data (this is so that there is no numerical issues with LARS pathing)
+    # Standardize response data (this is so that there is no numerical issues with LARS pathing)
     evaluations = np.asarray(evals)
     yhat = np.mean(evaluations, axis=0)
     evaluations_ = evaluations - yhat
-    var = np.var(evaluations, axis=0)
-    evaluations_ = evaluations_ / var
+    varY = np.var(evaluations, axis=0)
+    evaluations_ = evaluations_ / varY
 
     # Problem dimensions
     dimension = len(config.distribution)
@@ -233,23 +232,25 @@ def lars_pq_pce(
                     for idx in range(coeffs.shape[2])
                 ]
             )
-            
+
             # LeaveOneOut cross validation
             residual = (evaluations_.T - surrogates(*samples)) / hi
             errloo = np.mean(residual**2, axis=2)
             eloo = tpn * errloo
-            neloo = eloo/eloo[0, :] # I have to do this to normalize to 1, else numbers are HUGE (why not in UQLab?)
+            neloo = (
+                eloo / eloo[0, :]
+            )  # I have to do this to normalize to 1, else numbers are HUGE (why not in UQLab?)
 
             mineloo = np.min(neloo, axis=0)
             idmin = np.argmin(neloo, axis=0)
             idall = np.arange(idmin.shape[0])
-                
-            surrogate_mins = var * surrogates[idmin, idall] + yhat
-            
+
+            surrogate_mins = varY * surrogates[idmin, idall] + yhat
+
             pq.append([p, q])
             pqeloo.append(mineloo)
             mincoeff = np.asarray([coeffs[i, :, idmin[i]] for i in idall]).T
-            mincoeff *= var
+            mincoeff *= varY
             mincoeff[0, :] += yhat
             pqcoeff.append(mincoeff)
             pqsurr.append(surrogate_mins)
@@ -257,13 +258,100 @@ def lars_pq_pce(
     pqeloo = np.asarray(pqeloo)
     mineloo = np.min(pqeloo, axis=0)
     idxmin = np.argmin(pqeloo, axis=0)
-    
+
     surrmin = numpoly.aspolynomial([pqsurr[idx] for idx in idxmin])
     pqmin = np.asarray([pq[idx] for idx in idxmin])
     pqcoeffmin = [pqcoeff[idx].T for idx in idxmin]
 
     return surrmin, mineloo, pqcoeffmin, pqmin
+
+
+def sp_fn_pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
+    # Standardize response data (this is so that there is no numerical issues with LARS pathing)
+    evaluations = np.asarray(evals)
+    yhat = np.mean(evaluations, axis=0)
+    evaluations_ = evaluations - yhat
+    varY = np.var(evaluations, axis=0)
+    evaluations_ = evaluations_ / varY
+
+    # Problem dimensions
+    dimension = len(config.distribution)
+    n = len(evals)
+
+    alpha = cp.glexindex(
+        start=0,
+        stop=4,
+        dimensions=dimension,
+        cross_truncation=0.9,
+        graded=True,
+    ).T
     
+    polynomials = generate_expansion_from_alpha(alpha, config)
+    poly_evals = polynomials(*samples).T
+    
+    coeff = subspace_pursuit(1, poly_evals, evaluations_)
+    print(coeff)
+
+
+def subspace_pursuit(K, X, y):
+    """ subspace_pursuit 
+    K: Approximate bound on signal sparsity such that K >= s 
+    X: (nsamples, nfeatures) shapes measurement matrix
+    y: (nsamples, ntargets) or (nsamples, ) measurements """
+
+    uhat = np.zeros((X.shape[1], y.shape[1]))
+    max_iter = X.shape[1]
+    W = np.eye(max_iter)
+
+    # Initial estimateo
+    for i in range(y.shape[1]):
+        x = np.zeros(max_iter)
+        corr = np.abs(X.T @ y[:, i])
+        s0 = np.sort(corr)[::-1]
+        idk = np.nonzero(corr >= s0[K])[0]
+
+        x[idk] = np.linalg.pinv(X[:, idk]) @ y[:, i]
+        ur0 = y[:, i] - X @ x
+
+        iter = 0
+        while True:
+            corr = np.abs(X.T @ y[:, i])
+            s0 = np.sort(corr)[::-1]
+            idk2 = np.nonzero(corr >= s0[K])[0]
+            idk2 = np.union1d(idk, idk2)
+
+            x = np.zeros(max_iter)
+            x[idk2] = np.linalg.pinv(X[:, idk2]) @ y[:, i]
+
+            # Updated support estimation
+            idk0 = idk
+            s0 = np.sort(np.abs(x))[::-1]
+            idk = np.nonzero(np.abs(x) >= s0[K])[0]
+
+            # Update residual
+            x = np.zeros(max_iter)
+            x[idk] = np.linalg.pinv(X[:, idk]) @ y[:, i]
+            ur = y[:, i] - X @ x
+
+            # Break conditions
+            iter += 1
+            urhat = np.linalg.norm(ur)
+            ur0hat = np.linalg.norm(ur0)
+            if urhat >= ur0hat:
+                idk = idk0
+                ur0 = ur
+                break
+
+            if iter == max_iter:
+                ur0 = ur
+                break
+        
+        slice = uhat[:, i]
+        np.put(slice, idk, np.linalg.pinv(X[:, idk]) @ y[:, i])
+        uhat[:, i] = slice
+        uhat[:, i] = W @ uhat[:, i]
+
+    return uhat
 
 def generate_expansion_from_alpha(alpha, config):
     qs = cp.variable(len(config.distribution))
