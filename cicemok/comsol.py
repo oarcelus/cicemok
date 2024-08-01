@@ -97,9 +97,10 @@ def set_soc(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     assert config.experiment is not None
     assert config.experiment.experiment is not None
 
-    model.java.component("comp1").variable("var1").set(
-        config.isocname, config.experiment.isoc
-    )
+    model.java.param("par2").set(config.isocname, config.experiment.isoc)
+    #model.java.component("comp1").variable("var1").set(
+    #    config.isocname, config.experiment.isoc
+    #)
 
     return model
 

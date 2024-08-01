@@ -42,7 +42,7 @@ def balance_electrodes(
     cell_ocv: np.ndarray,
     c_host_p: float,
     c_host_n: float,
-    c_dch_max_n_cyl: float,
+    c_max: float,
     mode: Literal["charge", "discharge"], 
     method: str = "BFGS",
 ):
@@ -52,11 +52,11 @@ def balance_electrodes(
     cell_ocv: (N'', 2) numpy array with Capacity vs Voltage in full-cell
     c_host_p: Positive host capacity scaled to the 'cell_ocv' level
     c_host_n: Negative host capacity scaled to the 'cell_ocv' level
-    c_dch_max_n_cyl: Available capacity of Li ions between positive and negative
+    c_max: Available capacity of Li ions between positive and negative (depend on chg or dchg)
     """
     yhost_p_init = c_host_p / cell_ocv[-1, 0]
     yhost_n_init = c_host_n / cell_ocv[-1, 0]
-    ylitot_init = c_dch_max_n_cyl / cell_ocv[-1, 0]
+    ylitot_init = c_max / cell_ocv[-1, 0]
     soln0_init = 0.0 
 
     obj = partial(
