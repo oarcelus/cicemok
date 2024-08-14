@@ -1,6 +1,7 @@
 import multiprocessing
 from typing import Optional
 
+import matplotlib.pyplot as plt
 import mph
 import numpy as np
 
@@ -81,9 +82,7 @@ def set_timesteps(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     assert config.experiment is not None
     assert config.experiment.experiment is not None
 
-    dt = config.experiment.texp / config.experiment.experiment.shape[0] / 6
-    if int(config.experiment.texp / dt) < 100:
-        dt = config.experiment.texp / 100
+    dt = config.experiment.texp / config.experiment.experiment.shape[0] / 20
 
     model.java.study("std1").feature("time").set("tunit", "s")
     model.java.study("std1").feature("time").set(
@@ -97,10 +96,9 @@ def set_soc(model: mph.Model, config: ComsolConfiguration) -> mph.Model:
     assert config.experiment is not None
     assert config.experiment.experiment is not None
 
-    model.java.param("par2").set(config.isocname, config.experiment.isoc)
-    #model.java.component("comp1").variable("var1").set(
-    #    config.isocname, config.experiment.isoc
-    #)
+    model.java.component("comp1").variable("var1").set(
+        config.isocname, config.experiment.isoc
+    )
 
     return model
 
@@ -119,10 +117,12 @@ def set_model_parameters(
 def run_comsol_model(
     input: np.ndarray, model: mph.Model, config: ComsolConfiguration
 ) -> np.ndarray | None:
+
     model = set_model_parameters(input, model, config)
     try:
         model.solve()
         result: np.ndarray = model.evaluate(config.expression, dataset=config.database)
+
         return result
     except Exception:
         return None
@@ -146,6 +146,8 @@ def set_model_parameters_pool(input: np.ndarray, config: ComsolConfiguration):
 
 def comsol_worker_pool(sample: np.ndarray, config: ComsolConfiguration):
     global model
+
+    print(sample)
 
     model = set_configuration(model, config)
     result = run_comsol_model(sample, model, config)

@@ -3,6 +3,7 @@ import multiprocessing
 import os
 import pickle
 import queue
+import copy
 
 import matplotlib.pyplot as plt
 import chaospy as cp
@@ -274,9 +275,7 @@ def pool_experiment_optimization_general_pce(
         *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
     )
 
-    sens_cfg.distribution = distribution_r
-
-    samples_r = sens_cfg.distribution.sample(nsamples, rule=sens_cfg.rule)
+    samples_r = distribution_r.sample(nsamples, rule=sens_cfg.rule)
     samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
 
     evals = sensitivity.evaluate_models_pool(pool, samples_q, comsol_cfg)
@@ -288,11 +287,12 @@ def pool_experiment_optimization_general_pce(
         bo_iter += 1
         return 0.0
 
+    sens_cfg_copy = copy.deepcopy(sens_cfg)
+    sens_cfg_copy.distribution = distribution_r
+
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
     logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
-    polyno, fourier, surrogate = sensitivity.pce(
-        samples_r, evaluations, sens_cfg
-    )
+    polyno, fourier, surrogate = sensitivity.pce(samples_r, evaluations, sens_cfg_copy)
     logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
 
     # Save samples for the current iteration
@@ -311,7 +311,7 @@ def pool_experiment_optimization_general_pce(
         pickle.dump(experiment_cfg, file)
 
     logging.info(f"SOBOL: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
-    sobol_t, sobol_2, sobol = sensitivity.get_analytical_sobol(fourier, sens_cfg)
+    sobol_t, sobol_2, sobol = sensitivity.get_analytical_sobol(fourier, sens_cfg_copy)
     logging.info(f"SOBOL: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
 
     if sobol_t:
@@ -368,11 +368,8 @@ def pool_experiment_optimization_normal_pce(
 
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
     logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
-    polyno, fourier, surrogate = sensitivity.pce(
-        samples, evaluations, sens_cfg
-    )
+    polyno, fourier, surrogate = sensitivity.pce(samples, evaluations, sens_cfg)
     logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
-
 
     # Save samples for the current iteration
     with open(f"samples{idx}_boiter{bo_iter}.pkl", "wb") as file:
