@@ -1,4 +1,5 @@
 import logging
+import pickle
 import os
 import chaospy as cp
 import numpy as np
@@ -18,6 +19,7 @@ logging.basicConfig(
     filemode="w",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
 
 def main():
     distribution = cp.J(
@@ -45,13 +47,39 @@ def main():
     ncores = 1
     nsamples = 4
 
-    evals = get_sa_from_experiment(
-        npool=npool,
-        ncores=ncores,
-        nsamples=nsamples,
-        experiment=comsol_cfg,
-        config=sens_cfg,
+    samples_r, x, ys, polyno, fourier, surrogate, sobol, sobol_2, sobol_t = (
+        get_sa_from_experiment(
+            npool=npool,
+            ncores=ncores,
+            nsamples=nsamples,
+            experiment=comsol_cfg,
+            config=sens_cfg,
+        )
     )
+
+    # Save samples for the current iteration
+    with open("samples.pkl", "wb") as file:
+        pickle.dump(samples_r, file)
+    # Save evals for the current iteration
+    with open("evaluations.pkl", "wb") as file:
+        pickle.dump([x, ys], file)
+    # Save surrogate for the current iteration
+    with open("surrogate.pkl", "wb") as file:
+        pickle.dump([x, surrogate], file)
+
+    if sobol_t:
+        # Save sobol indices of the full time series
+        with open("sobol_total.pkl", "wb") as file:
+            pickle.dump(sobol_t, file)
+
+    if sobol_2:
+        # Save sobol indices of the full time series
+        with open("sobol_interaction.pkl", "wb") as file:
+            pickle.dump(sobol_2, file)
+
+    # Save sobol indices of the full time series
+    with open("sobol.pkl", "wb") as file:
+        pickle.dump(sobol, file)
 
 if __name__ == "__main__":
     main()

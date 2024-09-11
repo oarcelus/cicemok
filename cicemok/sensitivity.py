@@ -500,33 +500,10 @@ def get_sa_from_experiment(
         polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
         logging.info("SURROGATE: Done")
 
-        # Save samples for the current iteration
-        with open("samples.pkl", "wb") as file:
-            pickle.dump(samples_r, file)
-        # Save evals for the current iteration
-        with open("evaluations.pkl", "wb") as file:
-            pickle.dump([x, ys], file)
-        # Save surrogate for the current iteration
-        with open("surrogate.pkl", "wb") as file:
-            pickle.dump([x, surrogate], file)
-
         logging.info("SOBOL: START")
         sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, sens_cfg_copy)
         logging.info("SOBOL: END")
 
-        if sobol_t:
-            # Save sobol indices of the full time series
-            with open("sobol_total.pkl", "wb") as file:
-                pickle.dump(sobol_t, file)
-
-        if sobol_2:
-            # Save sobol indices of the full time series
-            with open("sobol_interaction.pkl", "wb") as file:
-                pickle.dump(sobol_2, file)
-
-        # Save sobol indices of the full time series
-        with open("sobol.pkl", "wb") as file:
-            pickle.dump(sobol, file)
 
     finally:
         pool.close()
