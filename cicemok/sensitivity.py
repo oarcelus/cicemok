@@ -474,8 +474,8 @@ def get_sa_from_experiment(
         evals = evaluate_models_pool(pool, samples_q, experiment)
 
         # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
-        xinit = min([v[0, 0] for v in evals])
-        xfin = max([v[-1, 0] for v in evals])
+        xinit = min([v[0, 0] for v in evals if v is not None])
+        xfin = max([v[-1, 0] for v in evals if v is not None])
 
         f = [
             (
