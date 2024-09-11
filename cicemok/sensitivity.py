@@ -474,8 +474,8 @@ def get_sa_from_experiment(
         evals = evaluate_models_pool(pool, samples_q, experiment)
 
         # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
-        xinit = min([v[0, 0] for v in evals if v is not None])
-        xfin = max([v[-1, 0] for v in evals if v is not None])
+        xinit = max([v[0, 0] for v in evals if v is not None])
+        xfin = min([v[-1, 0] for v in evals if v is not None])
 
         f = [
             (
@@ -488,6 +488,12 @@ def get_sa_from_experiment(
 
         x = np.linspace(xinit, xfin, 1000)
         ys = [interp(x) if interp is not None else None for interp in f]
+        
+        fig = plt.figure()
+        for y in ys:
+            plt.plot(y, x)
+
+        plt.show()
 
         evals = [np.column_stack((x, y)) if y is not None else None for y in ys]
         x, ys = curate_none_evaluations(evals, samples_q)
