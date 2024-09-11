@@ -35,7 +35,7 @@ def generate_experiment(config: ExperimentConfiguration) -> np.ndarray:
         isinstance(config.texp, float)
         and isinstance(config.dt, float)
         and isinstance(config.rate, float)
-        and isinstance(config.rmax, float)
+        and isinstance(config.rmax, float) 
         and isinstance(config.dynamics, float)
     )
 
@@ -57,7 +57,7 @@ def generate_experiment(config: ExperimentConfiguration) -> np.ndarray:
 
 def postprocess_experiment(
     samples: np.ndarray, config: ExperimentConfiguration
-) -> np.ndarray:
+) -> ExperimentConfiguration:
     """Bounds samples to configuration limits
     1) Modify Crate if socinit is below socmin or above socmax and steps is discharging / charging
     2) Modify Crate if trajectory reaches to socmin or socmax"""
@@ -74,15 +74,13 @@ def postprocess_experiment(
     samples = samples[:, 1]
 
     # 1)
-    soc = config.isoc
-    if soc < config.minsoc and samples[0] < 0:
-        val = (config.minsoc - soc + 0.01) / dt
-        samples[0] = val
-    elif soc > config.maxsoc and samples[0] > 0:
-        val = (config.maxsoc - soc - 0.01) / dt
-        samples[0] = val
+    if config.isoc < config.minsoc and samples[0] < 0:
+        config.isoc = config.minsoc + 0.01
+    elif config.isoc > config.maxsoc and samples[0] > 0:
+        config.isoc = config.maxsoc - 0.01
 
     # 2)
+    soc = config.isoc
     for i, sample in enumerate(samples.copy()):
         if soc + sample * dt < config.minsoc:
             val = (config.minsoc - soc) / dt
@@ -94,8 +92,9 @@ def postprocess_experiment(
         soc += samples[i] * dt
 
     results = np.column_stack((time, samples))
+    config.experiment = results
 
-    return results
+    return config
 
 
 def total_shannon_entropy(sobol: np.ndarray) -> float:
@@ -265,9 +264,10 @@ def pool_experiment_optimization_general_pce(
     experiment_cfg.isoc = isoc
     experiment_cfg.rate = rate
     experiment_cfg.texp = texp
+    experiment_cfg.experiment = None
 
     experiment = ode.generate_experiment(experiment_cfg)
-    experiment_cfg.experiment = ode.postprocess_experiment(experiment, experiment_cfg)
+    experiment_cfg = ode.postprocess_experiment(experiment, experiment_cfg)
     comsol_cfg.experiment = experiment_cfg
 
     distribution_q = sens_cfg.distribution
@@ -277,7 +277,6 @@ def pool_experiment_optimization_general_pce(
 
     samples_r = distribution_r.sample(nsamples, rule=sens_cfg.rule)
     samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
-
     evals = sensitivity.evaluate_models_pool(pool, samples_q, comsol_cfg)
     try:
         time, evaluations = sensitivity.curate_none_evaluations(evals, samples_q)
@@ -350,9 +349,10 @@ def pool_experiment_optimization_normal_pce(
     experiment_cfg.isoc = isoc
     experiment_cfg.rate = rate
     experiment_cfg.texp = texp
+    experiment_cfg.experiment = None
 
     experiment = ode.generate_experiment(experiment_cfg)
-    experiment_cfg.experiment = ode.postprocess_experiment(experiment, experiment_cfg)
+    experiment_cfg = ode.postprocess_experiment(experiment, experiment_cfg)
     comsol_cfg.experiment = experiment_cfg
 
     polyno = sensitivity.generate_polynomials(sens_cfg)

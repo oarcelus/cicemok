@@ -1,8 +1,10 @@
+import copy
+import logging
+import multiprocessing
 import os
-
+import pickle
 from datetime import datetime
 from functools import partial
-import matplotlib.pyplot as plt
 
 import chaospy as cp
 import gstools as gs
@@ -10,6 +12,7 @@ import matplotlib.pyplot as plt
 import mph
 import numpoly
 import numpy as np
+from scipy import interpolate
 from sklearn.linear_model import Lars, LarsCV, LassoLars, LassoLarsCV
 from sklearn.model_selection import LeaveOneOut
 
@@ -285,19 +288,19 @@ def sp_fn_pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration
         cross_truncation=0.9,
         graded=True,
     ).T
-    
+
     polynomials = generate_expansion_from_alpha(alpha, config)
     poly_evals = polynomials(*samples).T
-    
+
     coeff = subspace_pursuit(1, poly_evals, evaluations_)
     print(coeff)
 
 
 def subspace_pursuit(K, X, y):
-    """ subspace_pursuit 
-    K: Approximate bound on signal sparsity such that K >= s 
+    """subspace_pursuit
+    K: Approximate bound on signal sparsity such that K >= s
     X: (nsamples, nfeatures) shapes measurement matrix
-    y: (nsamples, ntargets) or (nsamples, ) measurements """
+    y: (nsamples, ntargets) or (nsamples, ) measurements"""
 
     uhat = np.zeros((X.shape[1], y.shape[1]))
     max_iter = X.shape[1]
@@ -345,13 +348,14 @@ def subspace_pursuit(K, X, y):
             if iter == max_iter:
                 ur0 = ur
                 break
-        
+
         slice = uhat[:, i]
         np.put(slice, idk, np.linalg.pinv(X[:, idk]) @ y[:, i])
         uhat[:, i] = slice
         uhat[:, i] = W @ uhat[:, i]
 
     return uhat
+
 
 def generate_expansion_from_alpha(alpha, config):
     qs = cp.variable(len(config.distribution))
@@ -441,3 +445,91 @@ def get_sobol_pck(
     sobol = cp.Sens_m(surrogate, config.distribution)
 
     return (sobol, surrogate)
+
+
+def get_sa_from_experiment(
+    npool: int,
+    ncores: int,
+    nsamples: int,
+    experiment: ComsolConfiguration,
+    config: SensitivityConfiguration,
+):
+    # Start Computing Processes for COMSOL
+    init_event = multiprocessing.Event()
+    pool = multiprocessing.Pool(
+        processes=npool,
+        initializer=comsol.setup_comsol_worker,
+        initargs=(ncores, experiment, init_event),
+    )
+    try:
+        init_event.wait()
+        distribution_q = config.distribution
+        distribution_r = cp.J(
+            *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
+        )
+
+        samples_r = distribution_r.sample(nsamples, rule=config.rule)
+        samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
+        logging.info("Starting Evaluations of Samples")
+        evals = evaluate_models_pool(pool, samples_q, experiment)
+
+        # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
+        xinit = min([v[0, 0] for v in evals])
+        xfin = max([v[-1, 0] for v in evals])
+
+        f = [
+            (
+                interpolate.interp1d(v[:, 0], v[:, 1], assume_sorted=False)
+                if v is not None
+                else None
+            )
+            for v in evals
+        ]
+
+        x = np.linspace(xinit, xfin, 1000)
+        ys = [interp(x) if interp is not None else None for interp in f]
+
+        evals = [np.column_stack((x, y)) if y is not None else None for y in ys]
+        x, ys = curate_none_evaluations(evals, samples_q)
+
+        sens_cfg_copy = copy.deepcopy(config)
+        sens_cfg_copy.distribution = distribution_r
+
+        logging.info("SUCCESS: All samples computed")
+        logging.info("SURROGATE: START -> Fitting regression PCE")
+        polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
+        logging.info("SURROGATE: Done")
+
+        # Save samples for the current iteration
+        with open("samples.pkl", "wb") as file:
+            pickle.dump(samples_r, file)
+        # Save evals for the current iteration
+        with open("evaluations.pkl", "wb") as file:
+            pickle.dump([x, ys], file)
+        # Save surrogate for the current iteration
+        with open("surrogate.pkl", "wb") as file:
+            pickle.dump([x, surrogate], file)
+
+        logging.info("SOBOL: START")
+        sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, sens_cfg_copy)
+        logging.info("SOBOL: END")
+
+        if sobol_t:
+            # Save sobol indices of the full time series
+            with open("sobol_total.pkl", "wb") as file:
+                pickle.dump(sobol_t, file)
+
+        if sobol_2:
+            # Save sobol indices of the full time series
+            with open("sobol_interaction.pkl", "wb") as file:
+                pickle.dump(sobol_2, file)
+
+        # Save sobol indices of the full time series
+        with open("sobol.pkl", "wb") as file:
+            pickle.dump(sobol, file)
+
+    finally:
+        pool.close()
+        pool.join()
+
+    return evals

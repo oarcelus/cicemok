@@ -147,8 +147,6 @@ def set_model_parameters_pool(input: np.ndarray, config: ComsolConfiguration):
 def comsol_worker_pool(sample: np.ndarray, config: ComsolConfiguration):
     global model
 
-    print(sample)
-
     model = set_configuration(model, config)
     result = run_comsol_model(sample, model, config)
 
