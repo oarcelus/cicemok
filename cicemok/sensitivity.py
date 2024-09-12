@@ -447,7 +447,7 @@ def get_sobol_pck(
     return (sobol, surrogate)
 
 
-def get_sa_from_experiment(
+def get_sampling_from_experiment(
     npool: int,
     ncores: int,
     nsamples: int,
@@ -492,21 +492,37 @@ def get_sa_from_experiment(
         evals = [np.column_stack((x, y)) if y is not None else None for y in ys]
         x, ys = curate_none_evaluations(evals, samples_q)
 
-        sens_cfg_copy = copy.deepcopy(config)
-        sens_cfg_copy.distribution = distribution_r
-
-        logging.info("SUCCESS: All samples computed")
-        logging.info("SURROGATE: START -> Fitting regression PCE")
-        polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
-        logging.info("SURROGATE: Done")
-
-        logging.info("SOBOL: START")
-        sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, sens_cfg_copy)
-        logging.info("SOBOL: END")
-
-
     finally:
         pool.close()
         pool.join()
+
+    return samples_r, x, ys
+
+
+def get_sa_from_experiment(
+    npool: int,
+    ncores: int,
+    nsamples: int,
+    experiment: ComsolConfiguration,
+    config: SensitivityConfiguration,
+):
+
+    distribution_q = config.distribution
+    distribution_r = cp.J(
+        *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
+    )
+    samples_r, x, ys = get_sampling_from_experiment(npool, ncores, nsamples, experiment, config)
+
+    sens_cfg_copy = copy.deepcopy(config)
+    sens_cfg_copy.distribution = distribution_r
+
+    logging.info("SUCCESS: All samples computed")
+    logging.info("SURROGATE: START -> Fitting regression PCE")
+    polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
+    logging.info("SURROGATE: Done")
+
+    logging.info("SOBOL: START")
+    sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, sens_cfg_copy)
+    logging.info("SOBOL: END")
 
     return samples_r, x, ys, polyno, fourier, surrogate, sobol, sobol_2, sobol_t
