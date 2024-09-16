@@ -453,6 +453,7 @@ def get_sampling_from_experiment(
     nsamples: int,
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
+    exclude: float
 ):
     # Start Computing Processes for COMSOL
     init_event = multiprocessing.Event()
@@ -474,13 +475,13 @@ def get_sampling_from_experiment(
         evals = evaluate_models_pool(pool, samples_q, experiment)
 
         # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
-        xinit = max([v[0, 0] for v in evals if v is not None])
-        xfin = min([v[-1, 0] for v in evals if v is not None])
+        xinit = min([v[0, 0] for v in evals if v is not None])
+        xfin = max([v[-1, 0] for v in evals if v is not None])
 
         f = [
             (
                 interpolate.interp1d(v[:, 0], v[:, 1], assume_sorted=False, fill_value="extrapolate")
-                if v is not None
+                if v is not None and v[-1, 0]/xfin > exclude
                 else None
             )
             for v in evals
