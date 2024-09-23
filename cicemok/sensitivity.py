@@ -506,13 +506,14 @@ def get_sa_from_experiment(
     nsamples: int,
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
+    exclude: float,
 ):
 
     distribution_q = config.distribution
     distribution_r = cp.J(
         *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
     )
-    samples_r, x, ys = get_sampling_from_experiment(npool, ncores, nsamples, experiment, config)
+    samples_r, x, ys = get_sampling_from_experiment(npool, ncores, nsamples, experiment, config, exclude)
 
     sens_cfg_copy = copy.deepcopy(config)
     sens_cfg_copy.distribution = distribution_r
