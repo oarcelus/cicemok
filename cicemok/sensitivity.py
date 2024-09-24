@@ -451,6 +451,7 @@ def get_sampling_from_experiment(
     npool: int,
     ncores: int,
     nsamples: int,
+    ninterp: int,
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
     exclude: float
@@ -487,7 +488,7 @@ def get_sampling_from_experiment(
             for v in evals
         ]
 
-        x = np.linspace(xinit, xfin, 1000)
+        x = np.linspace(xinit, xfin, ninterp)
         ys = [interp(x) if interp is not None else None for interp in f]
 
         evals = [np.column_stack((x, y)) if y is not None else None for y in ys]
@@ -504,6 +505,7 @@ def get_sa_from_experiment(
     npool: int,
     ncores: int,
     nsamples: int,
+    ninterp: int,
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
     exclude: float,
@@ -513,7 +515,7 @@ def get_sa_from_experiment(
     distribution_r = cp.J(
         *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
     )
-    samples_r, x, ys = get_sampling_from_experiment(npool, ncores, nsamples, experiment, config, exclude)
+    samples_r, x, ys = get_sampling_from_experiment(npool, ncores, nsamples, ninterp, experiment, config, exclude)
 
     sens_cfg_copy = copy.deepcopy(config)
     sens_cfg_copy.distribution = distribution_r
