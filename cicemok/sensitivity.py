@@ -457,7 +457,7 @@ def get_sobol_pck(
 def get_sampling_from_experiment(
     npool: int,
     ncores: int,
-    nsamples: int,
+    nsamples: int, # If project = True this is the order of the quadrature
     ninterp: int,
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
@@ -484,7 +484,7 @@ def get_sampling_from_experiment(
             weights = None
         else:
             samples_r, weights = cp.generate_quadrature(
-                config.order, distribution_r, rule="clenshaw_curtis", sparse=True
+                nsamples, distribution_r, rule="clenshaw_curtis", sparse=True
             )
             samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
 
