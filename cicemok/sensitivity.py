@@ -113,6 +113,13 @@ def pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
     return polyno, fourier, surrogate
 
 
+def pce_spectral(samples, weights, evals: list[np.ndarray], config: SensitivityConfiguration):
+    polyno = generate_polynomials(config)
+    surrogate, fourier = cp.fit_quadrature(polyno, samples, weights, evals, retall=True)
+
+    return polyno, fourier, surrogate
+
+
 def larscv_pq_pce(
     samples,
     evals: list[np.ndarray],
@@ -454,7 +461,8 @@ def get_sampling_from_experiment(
     ninterp: int,
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
-    exclude: float
+    exclude: float,
+    project: bool,
 ):
     # Start Computing Processes for COMSOL
     init_event = multiprocessing.Event()
@@ -470,10 +478,19 @@ def get_sampling_from_experiment(
             *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
         )
 
-        samples_r = distribution_r.sample(nsamples, rule=config.rule)
-        samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
+        if not project:
+            samples_r = distribution_r.sample(nsamples, rule=config.rule)
+            samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
+            weights = None
+        else:
+            samples_r, weights = cp.generate_quadrature(
+                config.order, distribution_r, rule="clenshaw_curtis", sparse=True
+            )
+            samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
+
         logging.info("Starting Evaluations of Samples")
         evals = evaluate_models_pool(pool, samples_q, experiment)
+        nevb = len(evals)
 
         # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
         xinit = min([v[0, 0] for v in evals if v is not None and v[0, 0] > exclude])
@@ -481,7 +498,9 @@ def get_sampling_from_experiment(
 
         f = [
             (
-                interpolate.interp1d(v[:, 0], v[:, 1], assume_sorted=False, fill_value="extrapolate")
+                interpolate.interp1d(
+                    v[:, 0], v[:, 1], assume_sorted=False, fill_value="extrapolate"
+                )
                 if v is not None and v[0, 0] > exclude
                 else None
             )
@@ -492,13 +511,20 @@ def get_sampling_from_experiment(
         ys = [interp(x) if interp is not None else None for interp in f]
 
         evals = [np.column_stack((x, y)) if y is not None else None for y in ys]
+        neva = len(evals)
+
+        if project and (nevb != neva):
+            raise ValueError(
+                "You are trying to the spectral projection for failed evaluations in quadrature points"
+            )
+
         x, ys = curate_none_evaluations(evals, samples_q)
 
     finally:
         pool.close()
         pool.join()
 
-    return samples_r, x, ys
+    return samples_r, x, ys, weights
 
 
 def get_sa_from_experiment(
@@ -509,20 +535,29 @@ def get_sa_from_experiment(
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
     exclude: float,
+    project: bool,
 ):
-
     distribution_q = config.distribution
     distribution_r = cp.J(
         *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
     )
-    samples_r, x, ys = get_sampling_from_experiment(npool, ncores, nsamples, ninterp, experiment, config, exclude)
+    samples_r, x, ys, weights = get_sampling_from_experiment(
+        npool, ncores, nsamples, ninterp, experiment, config, exclude, project
+    )
+
+    assert (project and weights is not None) or (not project and weights is None)
 
     sens_cfg_copy = copy.deepcopy(config)
     sens_cfg_copy.distribution = distribution_r
 
     logging.info("SUCCESS: All samples computed")
-    logging.info("SURROGATE: START -> Fitting regression PCE")
-    polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
+
+    if not project:
+        logging.info("SURROGATE: START -> Fitting regression PCE")
+        polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
+    else:
+        logging.info("SURROGATE: START -> Fitting quadrature PCE")
+        polyno, fourier, surrogate = pce_spectral(samples_r, weights, ys, sens_cfg_copy)
     logging.info("SURROGATE: Done")
 
     logging.info("SOBOL: START")
