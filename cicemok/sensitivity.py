@@ -462,7 +462,7 @@ def get_sampling_from_experiment(
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
     exclude: float,
-    project: bool,
+    project: bool = False,
 ):
     # Start Computing Processes for COMSOL
     init_event = multiprocessing.Event()
@@ -535,7 +535,7 @@ def get_sa_from_experiment(
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
     exclude: float,
-    project: bool,
+    project: bool = False,
 ):
     distribution_q = config.distribution
     distribution_r = cp.J(
