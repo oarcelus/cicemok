@@ -120,66 +120,6 @@ def pce_spectral(samples, weights, evals: list[np.ndarray], config: SensitivityC
     return polyno, fourier, surrogate
 
 
-def larscv_pq_pce(
-    samples,
-    evals: list[np.ndarray],
-    config: SensitivityConfiguration,
-):
-    """
-    samples: Experimental design. (nsamples, nfeatures)
-    evals: Model evaluations. (nsamples, ntargets)
-    config: SensitivityConfiguration class
-    """
-    evaluations = np.asarray(evals)
-    yhat = np.mean(evaluations, axis=0)
-    evaluations_ = evaluations - yhat
-    empvar = 1.0 / (evaluations.shape[1] - 1) * np.sum(evaluations_**2, axis=0)
-    dimension = len(config.distribution)
-    n = len(evals)
-    for p in range(config.minorder, config.order + 1):
-        for q in np.arange(0.5, 1, 0.1):
-            alpha = cp.glexindex(
-                start=0,
-                stop=p + 1,
-                dimensions=dimension,
-                cross_truncation=q,
-                graded=True,
-            )
-
-            polynomials = generate_expansion_from_alpha(alpha.T, config)
-            poly_evals = polynomials(*samples).T
-
-            # Experimental matrix diagonal
-            invATA = np.linalg.inv(np.matmul(poly_evals.T, poly_evals))
-            h = np.matmul(np.matmul(poly_evals, invATA), poly_evals.T).diagonal()
-            hi = 1.0 - h
-
-            # Correction factor
-            cemp = 1.0 / n * np.matmul(poly_evals.T, poly_evals)
-            tpn = (
-                float(n)
-                / (float(n) - float(len(polynomials)))
-                * (1.0 + np.trace(np.linalg.inv(cemp)) / float(n))
-            )
-
-            loo = LeaveOneOut()
-            larscv = LarsCV(fit_intercept=False, cv=loo, n_jobs=-1)
-            for i in range(n):
-                larscv.fit(poly_evals, evaluations[:, i])
-                print(larscv.mse_path_)
-                alpha_ = alpha[larscv.coef_ != 0]
-                polynomials_ = generate_expansion_from_alpha(alpha_.T, config)
-
-                surrogate, coef = cp.fit_regression(
-                    polynomials_, samples, evaluations[:, i], retall=True
-                )
-                hi = 1.0 - h
-                residual = (evaluations[:, i] - surrogate(*samples)) / hi
-                errloo = np.mean(residual**2)
-
-                eloo = errloo / empvar[i]
-
-
 def lars_pq_pce(
     samples,
     evals: list[np.ndarray],
@@ -189,7 +129,6 @@ def lars_pq_pce(
     samples: Experimental design. (nsamples, nfeatures)
     evals: Model evaluations. (nsamples, ntargets)
     config: SensitivityConfiguration class
-    naive: False if LOO error is computed on the LAR path of each **ntarget** data point. True if only one point is computed
     """
     # Standardize response data (this is so that there is no numerical issues with LARS pathing)
     evaluations = np.asarray(evals)
@@ -206,6 +145,7 @@ def lars_pq_pce(
     pqeloo = []
     pqcoeff = []
     pqsurr = []
+    pqpolyno = []
     for p in range(config.minorder, config.order + 1):
         for q in np.arange(0.5, 1, 0.1):
             alpha = cp.glexindex(
@@ -259,6 +199,7 @@ def lars_pq_pce(
 
             pq.append([p, q])
             pqeloo.append(mineloo)
+            pqpolyno.append(polynomials)
             mincoeff = np.asarray([coeffs[i, :, idmin[i]] for i in idall]).T
             mincoeff *= varY
             mincoeff[0, :] += yhat
@@ -273,7 +214,7 @@ def lars_pq_pce(
     pqmin = np.asarray([pq[idx] for idx in idxmin])
     pqcoeffmin = [pqcoeff[idx].T for idx in idxmin]
 
-    return surrmin, mineloo, pqcoeffmin, pqmin
+    return mineloo, pqcoeffmin, surrmin
 
 
 def sp_fn_pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
@@ -536,6 +477,7 @@ def get_sa_from_experiment(
     config: SensitivityConfiguration,
     exclude: float,
     project: bool = False,
+    method: str = "pce",
 ):
     distribution_q = config.distribution
     distribution_r = cp.J(
@@ -553,8 +495,13 @@ def get_sa_from_experiment(
     logging.info("SUCCESS: All samples computed")
 
     if not project:
-        logging.info("SURROGATE: START -> Fitting regression PCE")
-        polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
+        if method == "pce":
+            logging.info("SURROGATE: START -> Fitting regression PCE")
+            polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
+        elif method == "lars":
+            polyno, fourier, surrogate = lars_pq_pce(samples_r, ys, sens_cfg_copy)
+        else:
+            raise ValueError("method variable must be 'pce' or 'lars'")
     else:
         logging.info("SURROGATE: START -> Fitting quadrature PCE")
         polyno, fourier, surrogate = pce_spectral(samples_r, weights, ys, sens_cfg_copy)
