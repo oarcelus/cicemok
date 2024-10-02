@@ -24,14 +24,21 @@ from cicemok.configuration import (
 
 
 def generate_polynomials(config: SensitivityConfiguration):
-    return cp.generate_expansion(
-        config.order,
-        config.distribution,
-        normed=config.normed,
-        retall=config.retall,
-        cross_truncation=config.cross_truncation,
-    )
+    stop = config.order + 1
+    dimension = config.distribution.lower.shape[0]
+    trunc = config.cross_truncation
 
+    alpha = cp.glexindex(
+        start=0,
+        stop=stop,
+        dimensions=dimension,
+        cross_truncation=trunc,
+        graded=True,
+        reverse=True,
+    ).T
+
+    polynomials = generate_expansion_from_alpha(alpha, config)
+    return alpha, polynomials
 
 def curate_none_evaluations(
     evaluations: list[np.ndarray | None], samples: np.ndarray
@@ -107,17 +114,19 @@ def evaluate_models_pool(pool, samples: np.ndarray, config: ComsolConfiguration)
 
 
 def pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
-    polyno = generate_polynomials(config)
+    alpha, polyno = generate_polynomials(config)
     surrogate, fourier = cp.fit_regression(polyno, samples, evals, retall=True)
 
-    return polyno, fourier, surrogate
+    return [alpha] * len(surrogate), [polyno] * len(surrogate), fourier, surrogate
 
 
-def pce_spectral(samples, weights, evals: list[np.ndarray], config: SensitivityConfiguration):
-    polyno = generate_polynomials(config)
+def pce_spectral(
+    samples, weights, evals: list[np.ndarray], config: SensitivityConfiguration
+):
+    alpha, polyno = generate_polynomials(config)
     surrogate, fourier = cp.fit_quadrature(polyno, samples, weights, evals, retall=True)
 
-    return polyno, fourier, surrogate
+    return [alpha] * len(surrogate), [polyno] * len(surrogate), fourier, surrogate
 
 
 def lars_pq_pce(
@@ -132,22 +141,28 @@ def lars_pq_pce(
     """
     # Standardize response data (this is so that there is no numerical issues with LARS pathing)
     evaluations = np.asarray(evals)
-    yhat = np.mean(evaluations, axis=0)
-    evaluations_ = evaluations - yhat
-    varY = np.var(evaluations, axis=0)
-    evaluations_ = evaluations_ / varY
+    # yhat = np.mean(evaluations, axis=0)
+    # evaluations_ = evaluations - yhat
+    # varY = np.var(evaluations, axis=0)
+    # print(varY)
+    # evaluations_ = evaluations_ / varY
 
     # Problem dimensions
     dimension = len(config.distribution)
-    n = len(evals)
+    n = evaluations.shape[0]
+    ntrgt = evaluations.shape[1]
 
-    pq = []
-    pqeloo = []
-    pqcoeff = []
-    pqsurr = []
-    pqpolyno = []
-    for p in range(config.minorder, config.order + 1):
-        for q in np.arange(0.5, 1, 0.1):
+    results = {}
+    for q in np.linspace(0.5, 1, 5):
+        # Initialize arrays to check overfitting and save optimal surrogates
+        cverrors = np.full(ntrgt, np.inf, dtype=float)
+        counter = np.zeros(ntrgt, dtype=int)
+        activeidx = np.arange(ntrgt)
+        fourier = [0] * ntrgt
+        surrogates = [0] * ntrgt
+        polyno = [0] * ntrgt
+        alphas = [0] * ntrgt
+        for p in range(config.minorder, config.order + 1):
             alpha = cp.glexindex(
                 start=0,
                 stop=p + 1,
@@ -159,62 +174,73 @@ def lars_pq_pce(
             polynomials = generate_expansion_from_alpha(alpha, config)
             poly_evals = polynomials(*samples).T
 
-            # Experimental matrix diagonal
-            invATA = np.linalg.inv(np.matmul(poly_evals.T, poly_evals))
-            h = np.matmul(np.matmul(poly_evals, invATA), poly_evals.T).diagonal()
+            ATA = poly_evals.T @ poly_evals
+            I_ATA = np.linalg.inv(ATA)
+            h = (poly_evals @ I_ATA @ poly_evals.T).diagonal()
             hi = 1.0 - h
 
             # Correction factor
-            cemp = 1.0 / n * np.matmul(poly_evals.T, poly_evals)
             tpn = (
                 float(n)
+                * (1.0 + np.trace(I_ATA))
                 / (float(n) - float(len(polynomials)))
-                * (1.0 + np.trace(np.linalg.inv(cemp)) / float(n))
             )
+            lars = Lars(fit_intercept=False, n_nonzero_coefs=polynomials.shape[0])
+            lars.fit(poly_evals, evaluations[:, activeidx])
 
-            lars = Lars(fit_intercept=False, n_nonzero_coefs=n - 1)
-            lars.fit(poly_evals, evaluations_)
+            for i, coeffs in enumerate(lars.coef_path_):
+                surrogate = numpoly.sum(polynomials * coeffs.T, axis=1)
 
-            coeffs = np.asarray(lars.coef_path_)[:, :, 1:]
-            surrogates = numpoly.aspolynomial(
-                [
-                    numpoly.sum(polynomials * coeffs[:, :, idx], -1)
-                    for idx in range(coeffs.shape[2])
-                ]
-            )
+                idx = activeidx[i]
 
-            # LeaveOneOut cross validation
-            residual = (evaluations_.T - surrogates(*samples)) / hi
-            errloo = np.mean(residual**2, axis=2)
-            eloo = tpn * errloo
-            neloo = (
-                eloo / eloo[0, :]
-            )  # I have to do this to normalize to 1, else numbers are HUGE (why not in UQLab?)
+                # LeaveOneOut cross validation
+                residual = (evaluations[:, idx] - surrogate(*samples)) / hi
+                errloo = np.mean(residual**2, axis=1)
+                var = np.var(evaluations[:, idx], ddof=1)
+                eloo = tpn * errloo / var
 
-            mineloo = np.min(neloo, axis=0)
-            idmin = np.argmin(neloo, axis=0)
-            idall = np.arange(idmin.shape[0])
+                # Select and gather best LAR model
+                # Accept only if error is lower, and keep a counter for overfitting.
+                id = np.argmin(eloo)
+                if cverrors[idx] < eloo[id]:
+                    counter[idx] += 1
+                else:
+                    if counter[idx] > 0:
+                        counter[idx] -= 1
 
-            surrogate_mins = varY * surrogates[idmin, idall] + yhat
+                    fourier[idx] = coeffs[:, id]
+                    surrogates[idx] = surrogate[id]
+                    alphas[idx] = alpha
+                    polyno[idx] = polynomials
+                    cverrors[idx] = eloo[id]
 
-            pq.append([p, q])
-            pqeloo.append(mineloo)
-            pqpolyno.append(polynomials)
-            mincoeff = np.asarray([coeffs[i, :, idmin[i]] for i in idall]).T
-            mincoeff *= varY
-            mincoeff[0, :] += yhat
-            pqcoeff.append(mincoeff)
-            pqsurr.append(surrogate_mins)
+            # Check active targets
+            activeidx = np.where(counter != 2)[0]
+            if activeidx.size == 0:
+                break
 
-    pqeloo = np.asarray(pqeloo)
-    mineloo = np.min(pqeloo, axis=0)
-    idxmin = np.argmin(pqeloo, axis=0)
+        results[q] = {
+            "cverror": cverrors,
+            "fourier": fourier,
+            "surrogates": surrogates,
+            "alphas": alphas,
+            "polyno": polyno
+        }
 
-    surrmin = numpoly.aspolynomial([pqsurr[idx] for idx in idxmin])
-    pqmin = np.asarray([pq[idx] for idx in idxmin])
-    pqcoeffmin = [pqcoeff[idx].T for idx in idxmin]
+    qerrors = np.array([val["cverror"] for key, val in results.items()])
+    qfourier = np.array([val["fourier"] for key, val in results.items()])
+    qsurrogates = numpoly.aspolynomial([val["surrogates"] for key, val in results.items()])
+    qalphas = [val["alphas"] for key, val in results.items()]
+    qpolyno = [val["polyno"] for key, val in results.items()]
 
-    return mineloo, pqcoeffmin, surrmin
+    idxmin = np.argmin(qerrors, axis=0)
+    jdxmin = np.arange(idxmin.shape[0])
+
+    _ = qerrors[idxmin, jdxmin]
+    minfourier = qfourier[idxmin, jdxmin, :]
+    minsurrogates = qsurrogates[idxmin, jdxmin]
+
+    return polynomials, minfourier, minsurrogates
 
 
 def sp_fn_pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
@@ -398,7 +424,7 @@ def get_sobol_pck(
 def get_sampling_from_experiment(
     npool: int,
     ncores: int,
-    nsamples: int, # If project = True this is the order of the quadrature
+    nsamples: int,  # If project = True this is the order of the quadrature
     ninterp: int,
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
@@ -486,6 +512,13 @@ def get_sa_from_experiment(
     samples_r, x, ys, weights = get_sampling_from_experiment(
         npool, ncores, nsamples, ninterp, experiment, config, exclude, project
     )
+
+    fig = plt.figure()
+
+    for y in ys:
+        plt.plot(y, x)
+
+    plt.show()
 
     assert (project and weights is not None) or (not project and weights is None)
 
