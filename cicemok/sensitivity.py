@@ -163,15 +163,7 @@ def lars_pq_pce(
         polyno = [0] * ntrgt
         alphas = [0] * ntrgt
         for p in range(config.minorder, config.order + 1):
-            alpha = cp.glexindex(
-                start=0,
-                stop=p + 1,
-                dimensions=dimension,
-                cross_truncation=q,
-                graded=True,
-            ).T
-
-            polynomials = generate_expansion_from_alpha(alpha, config)
+            alpha, polynomials = generate_polynomials(config)
             poly_evals = polynomials(*samples).T
 
             ATA = poly_evals.T @ poly_evals
@@ -346,20 +338,7 @@ def generate_expansion_from_alpha(alpha, config):
     return polyno
 
 
-def get_analytical_sobol(fourier, config: SensitivityConfiguration):
-    stop = config.order + 1
-    dimension = config.distribution.lower.shape[0]
-    trunc = config.cross_truncation
-
-    alpha = cp.glexindex(
-        start=0,
-        stop=stop,
-        dimensions=dimension,
-        cross_truncation=trunc,
-        graded=True,
-        reverse=True,
-    ).T
-
+def get_analytical_sobol(fourier, alpha, config: SensitivityConfiguration):
     d_hat = np.sum(fourier[1:] ** 2, axis=0)
 
     sens_t_hat = None
@@ -530,14 +509,14 @@ def get_sa_from_experiment(
     if not project:
         if method == "pce":
             logging.info("SURROGATE: START -> Fitting regression PCE")
-            polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
+            alpha, polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
         elif method == "lars":
             polyno, fourier, surrogate = lars_pq_pce(samples_r, ys, sens_cfg_copy)
         else:
             raise ValueError("method variable must be 'pce' or 'lars'")
     else:
         logging.info("SURROGATE: START -> Fitting quadrature PCE")
-        polyno, fourier, surrogate = pce_spectral(samples_r, weights, ys, sens_cfg_copy)
+        alpha, polyno, fourier, surrogate = pce_spectral(samples_r, weights, ys, sens_cfg_copy)
     logging.info("SURROGATE: Done")
 
     logging.info("SOBOL: START")

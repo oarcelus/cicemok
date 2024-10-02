@@ -291,7 +291,7 @@ def pool_experiment_optimization_general_pce(
 
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
     logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
-    polyno, fourier, surrogate = sensitivity.pce(samples_r, evaluations, sens_cfg_copy)
+    alphas, polynos, fourier, surrogate = sensitivity.pce(samples_r, evaluations, sens_cfg_copy)
     logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
 
     # Save samples for the current iteration
@@ -355,7 +355,6 @@ def pool_experiment_optimization_normal_pce(
     experiment_cfg = ode.postprocess_experiment(experiment, experiment_cfg)
     comsol_cfg.experiment = experiment_cfg
 
-    polyno = sensitivity.generate_polynomials(sens_cfg)
     samples = sens_cfg.distribution.sample(nsamples, rule=sens_cfg.rule)
     evals = sensitivity.evaluate_models_pool(pool, samples, comsol_cfg)
     try:
@@ -368,7 +367,7 @@ def pool_experiment_optimization_normal_pce(
 
     logging.info(f"SUCCESS: Parameter: {idx} -> BO Loop: {bo_iter}")
     logging.info(f"SURROGATE: START -> Parameter: {idx} -> BO Loop: {bo_iter}")
-    polyno, fourier, surrogate = sensitivity.pce(samples, evaluations, sens_cfg)
+    alphas, polynos, fourier, surrogate = sensitivity.pce(samples, evaluations, sens_cfg)
     logging.info(f"SURROGATE: END -> Parameter: {idx} -> BO Loop: {bo_iter}")
 
     # Save samples for the current iteration
