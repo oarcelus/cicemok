@@ -40,6 +40,7 @@ def generate_polynomials(config: SensitivityConfiguration):
     polynomials = generate_expansion_from_alpha(alpha, config)
     return alpha, polynomials
 
+
 def curate_none_evaluations(
     evaluations: list[np.ndarray | None], samples: np.ndarray
 ) -> tuple[np.ndarray, list[np.ndarray]]:
@@ -117,7 +118,12 @@ def pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
     alpha, polyno = generate_polynomials(config)
     surrogate, fourier = cp.fit_regression(polyno, samples, evals, retall=True)
 
-    return [alpha] * len(surrogate), [polyno] * len(surrogate), fourier, surrogate
+    return (
+        np.array([alpha] * len(surrogate)),
+        numpoly.aspolynomial([polyno] * len(surrogate)),
+        fourier,
+        surrogate,
+    )
 
 
 def pce_spectral(
@@ -126,7 +132,12 @@ def pce_spectral(
     alpha, polyno = generate_polynomials(config)
     surrogate, fourier = cp.fit_quadrature(polyno, samples, weights, evals, retall=True)
 
-    return [alpha] * len(surrogate), [polyno] * len(surrogate), fourier, surrogate
+    return (
+        np.array([alpha] * len(surrogate)),
+        numpoly.aspolynomial([polyno] * len(surrogate)),
+        fourier,
+        surrogate,
+    )
 
 
 def lars_pq_pce(
@@ -141,14 +152,8 @@ def lars_pq_pce(
     """
     # Standardize response data (this is so that there is no numerical issues with LARS pathing)
     evaluations = np.asarray(evals)
-    # yhat = np.mean(evaluations, axis=0)
-    # evaluations_ = evaluations - yhat
-    # varY = np.var(evaluations, axis=0)
-    # print(varY)
-    # evaluations_ = evaluations_ / varY
 
     # Problem dimensions
-    dimension = len(config.distribution)
     n = evaluations.shape[0]
     ntrgt = evaluations.shape[1]
 
@@ -207,8 +212,9 @@ def lars_pq_pce(
                     cverrors[idx] = eloo[id]
 
             # Check active targets
-            activeidx = np.where(counter != 2)[0]
+            activeidx = np.where(counter != 2)[0]         
             if activeidx.size == 0:
+                logging.info(f"LARS: Norm: {q} Order: {p} Mean-ELOO: {np.mean(cverrors)}")
                 break
 
         results[q] = {
@@ -216,23 +222,26 @@ def lars_pq_pce(
             "fourier": fourier,
             "surrogates": surrogates,
             "alphas": alphas,
-            "polyno": polyno
+            "polyno": polyno,
         }
 
     qerrors = np.array([val["cverror"] for key, val in results.items()])
     qfourier = np.array([val["fourier"] for key, val in results.items()])
-    qsurrogates = numpoly.aspolynomial([val["surrogates"] for key, val in results.items()])
-    qalphas = [val["alphas"] for key, val in results.items()]
-    qpolyno = [val["polyno"] for key, val in results.items()]
+    qsurrogates = numpoly.aspolynomial(
+        [val["surrogates"] for key, val in results.items()]
+    )
+    qalphas = np.array([val["alphas"] for key, val in results.items()])
+    qpolyno = numpoly.aspolynomial([val["polyno"] for key, val in results.items()])
 
     idxmin = np.argmin(qerrors, axis=0)
     jdxmin = np.arange(idxmin.shape[0])
 
-    _ = qerrors[idxmin, jdxmin]
     minfourier = qfourier[idxmin, jdxmin, :]
     minsurrogates = qsurrogates[idxmin, jdxmin]
+    minalphas = qalphas[idxmin, jdxmin, :, :]
+    minpolynomials = qpolyno[idxmin, jdxmin, :]
 
-    return polynomials, minfourier, minsurrogates
+    return minalphas, minpolynomials, minfourier.T, minsurrogates
 
 
 def sp_fn_pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
@@ -338,15 +347,16 @@ def generate_expansion_from_alpha(alpha, config):
     return polyno
 
 
-def get_analytical_sobol(fourier, alpha, config: SensitivityConfiguration):
-    d_hat = np.sum(fourier[1:] ** 2, axis=0)
+def get_analytical_sobol(fouriers, alphas, config: SensitivityConfiguration):
+    dimension = config.distribution.lower.shape[0]
+    d_hat = np.sum(fouriers[1:, :] ** 2, axis=0)
 
     sens_t_hat = None
     if config.sobol_total:
         sens_t_hat = np.empty((dimension, d_hat.shape[0]))
         for idx in range(dimension):
-            index = alpha[idx, :] > 0
-            sens_t_hat[idx, :] = np.sum(fourier[index] ** 2, axis=0) / d_hat
+            index = alphas[:, idx, :] > 0
+            sens_t_hat[idx, :] = np.sum((fouriers * index.T) ** 2, axis=0) / d_hat
 
     sens_m2_hat = None
     if config.sobol_second:
@@ -355,16 +365,16 @@ def get_analytical_sobol(fourier, alpha, config: SensitivityConfiguration):
             for jdx in range(dimension):
                 index = (
                     (idx != jdx)
-                    & (alpha[idx, :] > 0)
-                    & (alpha[jdx, :] > 0)
-                    & (alpha.sum(0) == alpha[idx, :] + alpha[jdx, :])
+                    & (alphas[:, idx, :] > 0)
+                    & (alphas[:, jdx, :] > 0)
+                    & (alphas.sum(0) == alphas[:, idx, :] + alphas[:, jdx, :])
                 )
-                sens_m2_hat[idx, jdx, :] = np.sum(fourier[index] ** 2, axis=0) / d_hat
+                sens_m2_hat[idx, jdx, :] = np.sum(fouriers * index.T**2, axis=0) / d_hat
 
     sens_m_hat = np.empty((dimension, d_hat.shape[0]))
     for idx in range(dimension):
-        index = (alpha[idx, :] > 0) & (alpha.sum(0) == alpha[idx, :])
-        sens_m_hat[idx] = np.sum(fourier[index] ** 2, axis=0) / d_hat
+        index = (alphas[:, idx, :] > 0) & (alphas.sum(1) == alphas[:, idx, :])
+        sens_m_hat[idx, :] = np.sum((fouriers * index.T) ** 2, axis=0) / d_hat
 
     return sens_t_hat, sens_m2_hat, sens_m_hat
 
@@ -393,7 +403,6 @@ def get_sobol_pck(
     _polyno = polyno[coeffs != 0]
 
     # Fit variogram
-
     model = gs.Gaussian(dim=samples.shape[0], var=variance)
     sobol = cp.Sens_m(surrogate, config.distribution)
 
@@ -434,7 +443,6 @@ def get_sampling_from_experiment(
             )
             samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
 
-        logging.info("Starting Evaluations of Samples")
         evals = evaluate_models_pool(pool, samples_q, experiment)
         nevb = len(evals)
 
@@ -492,35 +500,23 @@ def get_sa_from_experiment(
         npool, ncores, nsamples, ninterp, experiment, config, exclude, project
     )
 
-    fig = plt.figure()
-
-    for y in ys:
-        plt.plot(y, x)
-
-    plt.show()
-
     assert (project and weights is not None) or (not project and weights is None)
 
     sens_cfg_copy = copy.deepcopy(config)
     sens_cfg_copy.distribution = distribution_r
 
-    logging.info("SUCCESS: All samples computed")
-
     if not project:
         if method == "pce":
-            logging.info("SURROGATE: START -> Fitting regression PCE")
             alpha, polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
         elif method == "lars":
-            polyno, fourier, surrogate = lars_pq_pce(samples_r, ys, sens_cfg_copy)
+            alpha, polyno, fourier, surrogate = lars_pq_pce(samples_r, ys, sens_cfg_copy)
         else:
             raise ValueError("method variable must be 'pce' or 'lars'")
     else:
-        logging.info("SURROGATE: START -> Fitting quadrature PCE")
-        alpha, polyno, fourier, surrogate = pce_spectral(samples_r, weights, ys, sens_cfg_copy)
-    logging.info("SURROGATE: Done")
+        alpha, polyno, fourier, surrogate = pce_spectral(
+            samples_r, weights, ys, sens_cfg_copy
+        )
 
-    logging.info("SOBOL: START")
-    sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, sens_cfg_copy)
-    logging.info("SOBOL: END")
+    sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, sens_cfg_copy)
 
     return samples_r, x, ys, polyno, fourier, surrogate, sobol, sobol_2, sobol_t
