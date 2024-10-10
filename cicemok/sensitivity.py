@@ -3,6 +3,7 @@ import logging
 import multiprocessing
 import os
 import pickle
+import time
 from datetime import datetime
 from functools import partial
 
@@ -12,6 +13,9 @@ import matplotlib.pyplot as plt
 import mph
 import numpoly
 import numpy as np
+from SALib import ProblemSpec
+from SALib.analyze import sobol as analyzer
+from SALib.sample import sobol as sampler
 from scipy import interpolate
 from sklearn.linear_model import Lars, LarsCV, LassoLars, LassoLarsCV
 from sklearn.model_selection import LeaveOneOut
@@ -121,7 +125,7 @@ def pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
     return (
         np.array([alpha] * len(surrogate)),
         numpoly.aspolynomial([polyno] * len(surrogate)),
-        fourier,
+        fourier.T,
         surrogate,
     )
 
@@ -135,7 +139,7 @@ def pce_spectral(
     return (
         np.array([alpha] * len(surrogate)),
         numpoly.aspolynomial([polyno] * len(surrogate)),
-        fourier,
+        fourier.T,
         surrogate,
     )
 
@@ -152,96 +156,204 @@ def lars_pq_pce(
     """
     # Standardize response data (this is so that there is no numerical issues with LARS pathing)
     evaluations = np.asarray(evals)
+    config_loop = copy.deepcopy(config)
 
     # Problem dimensions
     n = evaluations.shape[0]
     ntrgt = evaluations.shape[1]
 
     results = {}
-    for q in np.linspace(0.5, 1, 5):
+    #for q in np.linspace(0.5, 1, 5):
+    for q in np.linspace(0.75, 1, 1):
         # Initialize arrays to check overfitting and save optimal surrogates
         cverrors = np.full(ntrgt, np.inf, dtype=float)
         counter = np.zeros(ntrgt, dtype=int)
         activeidx = np.arange(ntrgt)
         fourier = [0] * ntrgt
         surrogates = [0] * ntrgt
-        polyno = [0] * ntrgt
         alphas = [0] * ntrgt
-        for p in range(config.minorder, config.order + 1):
-            alpha, polynomials = generate_polynomials(config)
+        polyno = [0] * ntrgt
+        #for p in range(config.minorder, config.order + 1):
+        for p in [3]:
+            config_loop.order = p
+            config_loop.cross_truncation = q
+            alpha, polynomials = generate_polynomials(config_loop)
             poly_evals = polynomials(*samples).T
 
-            ATA = poly_evals.T @ poly_evals
-            I_ATA = np.linalg.inv(ATA)
-            h = (poly_evals @ I_ATA @ poly_evals.T).diagonal()
-            hi = 1.0 - h
-
-            # Correction factor
-            tpn = (
-                float(n)
-                * (1.0 + np.trace(I_ATA))
-                / (float(n) - float(len(polynomials)))
-            )
-            lars = Lars(fit_intercept=False, n_nonzero_coefs=polynomials.shape[0])
+            lars = Lars(fit_intercept=False, n_nonzero_coefs=n - 1)
             lars.fit(poly_evals, evaluations[:, activeidx])
 
-            for i, coeffs in enumerate(lars.coef_path_):
-                surrogate = numpoly.sum(polynomials * coeffs.T, axis=1)
+            if not isinstance(lars.coef_path_, list):
+                lars.coef_path_ = [lars.coef_path_]
 
+            for i, coeffs in enumerate(lars.coef_path_):
                 idx = activeidx[i]
 
-                # LeaveOneOut cross validation
-                residual = (evaluations[:, idx] - surrogate(*samples)) / hi
+                # Find correction factors for LOO error
+                tpns = np.ones(coeffs.shape[1], dtype=float)
+                his = np.ones((coeffs.shape[1], n), dtype=float)
+                innersurr = [0.0]
+                lars_polys = [polynomials * 0.0]
+                lars_alphas = [alpha * 0.0]
+                uhats = [np.zeros(len(polynomials), dtype=float)]
+                start = time.time()
+                for j, coeff in enumerate(coeffs.T[1:]):
+                    # Build polynomials from coeffs
+                    idnonzero = coeff != 0
+                    lars_poly = polynomials[idnonzero]
+                    evals = lars_poly(*samples).T
+
+                    # Correction factors
+                    ATA = evals.T @ evals
+                    I_ATA = np.linalg.inv(ATA)
+                    h = (evals @ I_ATA @ evals.T).diagonal()
+                    hi = 1.0 - h
+                    his[j + 1, :] = hi
+
+                    tpn = (
+                        float(n)
+                        * (1.0 + np.trace(I_ATA))
+                        / (float(n) - float(evals.shape[1]))
+                    )
+                    tpns[j + 1] = tpn
+
+                    # Obtain least-squares solution of the LARS selected features along path
+                    uhat = np.linalg.lstsq(evals, evaluations[:, idx], rcond=None)[0]
+                    surrogate = numpoly.sum(lars_poly * uhat)
+
+                    # Save data for current iteration
+                    innersurr.append(surrogate)
+                    lars_polys.append(polynomials * idnonzero)
+                    lars_alphas.append(alpha * idnonzero)
+                    coeff[idnonzero] = uhat
+                    uhats.append(coeff)
+
+                # Leave One Out Error
+                residual = (evaluations[:, idx] - surrogate(*samples)) / his
                 errloo = np.mean(residual**2, axis=1)
                 var = np.var(evaluations[:, idx], ddof=1)
-                eloo = tpn * errloo / var
+                eloo = tpns * errloo / var
 
-                # Select and gather best LAR model
+                innersurr = numpoly.aspolynomial(innersurr)
+
                 # Accept only if error is lower, and keep a counter for overfitting.
                 id = np.argmin(eloo)
-                if cverrors[idx] < eloo[id]:
+                if cverrors[idx] - eloo[id] < -1e-8:
                     counter[idx] += 1
                 else:
                     if counter[idx] > 0:
                         counter[idx] -= 1
 
-                    fourier[idx] = coeffs[:, id]
-                    surrogates[idx] = surrogate[id]
-                    alphas[idx] = alpha
-                    polyno[idx] = polynomials
+                    fourier[idx] = uhats[id]
+                    surrogates[idx] = innersurr[id]
+                    polyno[idx] = lars_polys[id]
+                    alphas[idx] = lars_alphas[id]
                     cverrors[idx] = eloo[id]
+                    
+                    print(eloo[id])
+                    print(innersurr[id])
 
-            # Check active targets
-            activeidx = np.where(counter != 2)[0]         
+                end = time.time()
+                print(end - start)
+
+                # Alternative method for LOO error calculations
+                start = time.time()
+                count_eloo = 0
+                eloo_min = np.inf
+                poly_min = polynomials * 0.0
+                alpha_min = alpha * 0.0
+                surr_min = 0.0
+                uhat_min = np.zeros(len(polynomials), dtype=float)
+                for j, coeff in enumerate(coeffs.T[1:]):
+                    # Build polynomials from coeffs
+                    idnonzero = coeff != 0
+                    lars_poly = polynomials[idnonzero]
+                    evals = lars_poly(*samples).T
+
+                    # Correction factors
+                    ATA = evals.T @ evals
+                    I_ATA = np.linalg.inv(ATA)
+                    h = (evals @ I_ATA @ evals.T).diagonal()
+                    hi = 1.0 - h
+
+                    tpn = (
+                        float(n)
+                        * (1.0 + np.trace(I_ATA))
+                        / (float(n) - float(evals.shape[1]))
+                    )
+
+                    # Obtain least-squares solution of the LARS selected features along path
+                    uhat = np.linalg.lstsq(evals, evaluations[:, idx], rcond=None)[0]
+                    surrogate = numpoly.sum(lars_poly * uhat)
+
+                    # Leave One Out Error
+                    residual = (evaluations[:, idx] - surrogate(*samples)) / hi
+                    errloo = np.mean(residual**2)
+                    var = np.var(evaluations[:, idx], ddof=1)
+                    eloo = tpn * errloo / var
+
+                    if eloo_min - eloo < -1e-8:
+                        count_eloo += 1
+                    else:
+                        if count_eloo > 0:
+                            count_eloo -= 1
+
+                        eloo_min = eloo
+                        surr_min = surrogate
+                        poly_min = polynomials * idnonzero
+                        alpha_min = alpha * idnonzero
+                        coeff[idnonzero] = uhat
+                        uhat_min = coeff
+
+                    if count_eloo == 2:
+                        break
+
+                print(eloo)
+                print(surrogate)
+
+                end = time.time()
+                print(end - start)
+
+                
+            # Check active target
+            activeidx = np.where(counter != 2)[0]
+
+            logging.info(
+                f"LARS: Norm: {config_loop.cross_truncation} Order: {config_loop.order} Mean-ELOO: {np.mean(cverrors):.4f} Cardinality: {np.mean([np.count_nonzero(pol) for pol in polyno])} - {len(polynomials)} Active: {activeidx.shape[0]}"
+            )
             if activeidx.size == 0:
-                logging.info(f"LARS: Norm: {q} Order: {p} Mean-ELOO: {np.mean(cverrors)}")
                 break
 
         results[q] = {
             "cverror": cverrors,
             "fourier": fourier,
             "surrogates": surrogates,
-            "alphas": alphas,
             "polyno": polyno,
+            "alphas": alphas,
         }
 
     qerrors = np.array([val["cverror"] for key, val in results.items()])
-    qfourier = np.array([val["fourier"] for key, val in results.items()])
+    qfourier = [val["fourier"] for key, val in results.items()]
     qsurrogates = numpoly.aspolynomial(
         [val["surrogates"] for key, val in results.items()]
     )
-    qalphas = np.array([val["alphas"] for key, val in results.items()])
-    qpolyno = numpoly.aspolynomial([val["polyno"] for key, val in results.items()])
+    qalphas = [val["alphas"] for key, val in results.items()]
+    qpolyno = [val["polyno"] for key, val in results.items()]
 
     idxmin = np.argmin(qerrors, axis=0)
     jdxmin = np.arange(idxmin.shape[0])
 
-    minfourier = qfourier[idxmin, jdxmin, :]
+    minfourier = [qfourier[i][j] for i, j in zip(idxmin, jdxmin)]
     minsurrogates = qsurrogates[idxmin, jdxmin]
-    minalphas = qalphas[idxmin, jdxmin, :, :]
-    minpolynomials = qpolyno[idxmin, jdxmin, :]
+    minpolynomials = [qpolyno[i][j] for i, j in zip(idxmin, jdxmin)]
+    minalphas = [qalphas[i][j] for i, j in zip(idxmin, jdxmin)]
 
-    return minalphas, minpolynomials, minfourier.T, minsurrogates
+    assert len(minfourier) == ntrgt
+    assert len(minpolynomials) == ntrgt
+    assert len(minalphas) == ntrgt
+    assert minsurrogates.shape[0] == ntrgt
+
+    return minalphas, minpolynomials, minfourier, minsurrogates
 
 
 def sp_fn_pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
@@ -349,64 +461,45 @@ def generate_expansion_from_alpha(alpha, config):
 
 def get_analytical_sobol(fouriers, alphas, config: SensitivityConfiguration):
     dimension = config.distribution.lower.shape[0]
-    d_hat = np.sum(fouriers[1:, :] ** 2, axis=0)
+    ntrgt = len(fouriers)
+    d_hat = np.array([np.sum(fourier**2) for fourier in fouriers])
 
     sens_t_hat = None
     if config.sobol_total:
         sens_t_hat = np.empty((dimension, d_hat.shape[0]))
         for idx in range(dimension):
-            index = alphas[:, idx, :] > 0
-            sens_t_hat[idx, :] = np.sum((fouriers * index.T) ** 2, axis=0) / d_hat
+            index = [alpha[idx, :] > 0 for alpha in alphas]
+            sens_t_hat[idx, :] = [
+                np.sum((fouriers[i] * index[i]) ** 2) / d_hat[i] for i in range(ntrgt)
+            ]
 
     sens_m2_hat = None
     if config.sobol_second:
         sens_m2_hat = np.empty((dimension, dimension, d_hat.shape[0]))
         for idx in range(dimension):
             for jdx in range(dimension):
-                index = (
+                index = [
                     (idx != jdx)
-                    & (alphas[:, idx, :] > 0)
-                    & (alphas[:, jdx, :] > 0)
-                    & (alphas.sum(0) == alphas[:, idx, :] + alphas[:, jdx, :])
-                )
-                sens_m2_hat[idx, jdx, :] = np.sum(fouriers * index.T**2, axis=0) / d_hat
+                    & (alpha[idx, :] > 0)
+                    & (alpha[jdx, :] > 0)
+                    & (alpha.sum(0) == alpha[idx, :] + alpha[jdx, :])
+                    for alpha in alphas
+                ]
+                sens_m2_hat[idx, jdx, :] = [
+                    np.sum((fouriers[i] * index[i]) ** 2) / d_hat[i]
+                    for i in range(ntrgt)
+                ]
 
     sens_m_hat = np.empty((dimension, d_hat.shape[0]))
     for idx in range(dimension):
-        index = (alphas[:, idx, :] > 0) & (alphas.sum(1) == alphas[:, idx, :])
-        sens_m_hat[idx, :] = np.sum((fouriers * index.T) ** 2, axis=0) / d_hat
+        index = [
+            (alpha[idx, :] > 0) & (alpha.sum(0) == alpha[idx, :]) for alpha in alphas
+        ]
+        sens_m_hat[idx, :] = [
+            np.sum((fouriers[i] * index[i]) ** 2) / d_hat[i] for i in range(ntrgt)
+        ]
 
     return sens_t_hat, sens_m2_hat, sens_m_hat
-
-
-def get_sobol_pck(
-    polyno, samples, evals: list[np.ndarray], config: SensitivityConfiguration
-) -> tuple[np.ndarray, np.ndarray]:
-    # Normalize sample data within bounds
-    up = config.distribution.upper
-    lo = config.distribution.lower
-    _samples = (samples.T - lo) / (up - lo)
-
-    # Fit variogram of the evaluations to a Gaussian Covariance Model
-    bin, gamma = gs.vario_estimate((var for var in _samples.T), evals)
-    gauss = gs.Gaussian(dim=samples.shape[0])
-    gauss.fit_variogram(bin, gamma)
-
-    ax = gauss.plot(x_max=max(bin))
-    ax.scatter(bin, gamma)
-
-    # Fit evaluations using angular regression model
-    lars = Lars(fit_intercept=False, max_iter=1000)
-    surrogate, coeffs = cp.fit_regression(polyno, samples, evals, model=lars, retall=1)
-
-    # Reduce polynomial pool by eliminating 0 fourier coefficients
-    _polyno = polyno[coeffs != 0]
-
-    # Fit variogram
-    model = gs.Gaussian(dim=samples.shape[0], var=variance)
-    sobol = cp.Sens_m(surrogate, config.distribution)
-
-    return (sobol, surrogate)
 
 
 def get_sampling_from_experiment(
@@ -417,7 +510,7 @@ def get_sampling_from_experiment(
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
     exclude: float,
-    project: bool = False,
+    method: str = "pce",
 ):
     # Start Computing Processes for COMSOL
     init_event = multiprocessing.Event()
@@ -433,15 +526,37 @@ def get_sampling_from_experiment(
             *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
         )
 
-        if not project:
+        if method == "project":
+            samples_r, weights = cp.generate_quadrature(
+                nsamples, distribution_r, rule=config.rule, sparse=True
+            )
+            samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
+            problem = None
+        elif method == "salib":
+            if config.rule != "sobol":
+                raise ValueError(
+                    "'rule' in ComsolConfiguration must be 'sobol' if method = 'salib'"
+                )
+
+            sp = ProblemSpec(
+                {
+                    "names": experiment.names,
+                    "bounds": [[-1.0, 1.0]] * distribution_r.lower.shape[0],
+                    "num_vars": len(experiment.names),
+                }
+            )
+
+            samples_r = sampler.sample(
+                sp, nsamples, calc_second_order=config.sobol_second
+            )
+            samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
+            weights = None
+            problem = sp
+        else:
             samples_r = distribution_r.sample(nsamples, rule=config.rule)
             samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
             weights = None
-        else:
-            samples_r, weights = cp.generate_quadrature(
-                nsamples, distribution_r, rule="clenshaw_curtis", sparse=True
-            )
-            samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
+            problem = None
 
         evals = evaluate_models_pool(pool, samples_q, experiment)
         nevb = len(evals)
@@ -467,9 +582,13 @@ def get_sampling_from_experiment(
         evals = [np.column_stack((x, y)) if y is not None else None for y in ys]
         neva = len(evals)
 
-        if project and (nevb != neva):
+        if method == "project" and (nevb != neva):
             raise ValueError(
                 "You are trying to the spectral projection for failed evaluations in quadrature points"
+            )
+        if method == "salib" and (nevb != neva):
+            raise ValueError(
+                "You are trying to use method from SALib with a sobol sampler for failed evaluations"
             )
 
         x, ys = curate_none_evaluations(evals, samples_q)
@@ -478,7 +597,7 @@ def get_sampling_from_experiment(
         pool.close()
         pool.join()
 
-    return samples_r, x, ys, weights
+    return samples_r, x, ys, weights, problem
 
 
 def get_sa_from_experiment(
@@ -489,34 +608,47 @@ def get_sa_from_experiment(
     experiment: ComsolConfiguration,
     config: SensitivityConfiguration,
     exclude: float,
-    project: bool = False,
     method: str = "pce",
 ):
     distribution_q = config.distribution
     distribution_r = cp.J(
         *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
     )
-    samples_r, x, ys, weights = get_sampling_from_experiment(
-        npool, ncores, nsamples, ninterp, experiment, config, exclude, project
+
+    samples_r, x, ys, weights, problem = get_sampling_from_experiment(
+        npool, ncores, nsamples, ninterp, experiment, config, exclude, method
     )
 
-    assert (project and weights is not None) or (not project and weights is None)
+    assert (method == "project" and weights is not None) or (
+        method != "project" and weights is None
+    )
+    assert (method == "salib" and problem is not None) or (
+        method != "salib" and problem is None
+    )
 
     sens_cfg_copy = copy.deepcopy(config)
     sens_cfg_copy.distribution = distribution_r
 
-    if not project:
-        if method == "pce":
-            alpha, polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
-        elif method == "lars":
-            alpha, polyno, fourier, surrogate = lars_pq_pce(samples_r, ys, sens_cfg_copy)
-        else:
-            raise ValueError("method variable must be 'pce' or 'lars'")
-    else:
+    if method == "pce":
+        alpha, polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
+    elif method == "lars":
+        alpha, polyno, fourier, surrogate = lars_pq_pce(samples_r, ys, sens_cfg_copy)
+    elif method == "project":
         alpha, polyno, fourier, surrogate = pce_spectral(
             samples_r, weights, ys, sens_cfg_copy
         )
+    elif method == "salib":
+        if config.rule != "sobol":
+            raise ValueError(
+                "'rule' in ComsolConfiguration must be 'sobol' if method = 'salib'"
+            )
+        sobol = analyzer(problem, ys, print_to_console=False)
+    else:
+        raise ValueError("method variable must be 'pce', 'project', 'salib', or 'lars'")
 
-    sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, sens_cfg_copy)
-
-    return samples_r, x, ys, polyno, fourier, surrogate, sobol, sobol_2, sobol_t
+    if method == "salib":
+        print(sobol)
+        pass
+    else:
+        sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, sens_cfg_copy)
+        return samples_r, x, ys, polyno, fourier, surrogate, sobol, sobol_2, sobol_t

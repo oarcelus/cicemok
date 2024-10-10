@@ -5,3 +5,4 @@ numpy==1.26.4
 setuptools==68.2.2
 pymatgen==2024.3.1
 Py-BOBYQA==1.4.1
+SALib
