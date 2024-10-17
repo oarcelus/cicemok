@@ -45,4 +45,5 @@ class SensitivityConfiguration:
     normed: bool = True
     sobol_total: bool = False
     sobol_second: bool = False
+    max_size: int = 25000
     

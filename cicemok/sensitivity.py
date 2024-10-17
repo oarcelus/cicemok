@@ -5,7 +5,7 @@ import multiprocessing
 import os
 import pickle
 import time
-from datetime import datetime
+from typing import Callable
 from functools import partial
 
 import chaospy as cp
@@ -28,7 +28,58 @@ from cicemok.configuration import (
 )
 
 
-def generate_polynomials(config: SensitivityConfiguration):
+def custom_stieltjes(
+    order,
+    dist,
+    alpha,
+    normed=True,
+):
+    """
+    Simplified version of stieltjes (chaospy) algorithm to test if there are any improvements on timing
+    There is almost no improvement when going to larger sizes, cp.stieltjes takes the full-time.
+    MAINTAINED HERE FOR TESTING PURPOSES, SPECIALLY FORWARD-NEIGHBOR
+
+    """
+    (
+        _,
+        polynomials,
+        norms,
+    ) = cp.stieltjes(np.max(order), dist)
+    if normed:
+        polynomials = numpoly.true_divide(
+            numpoly.polynomial(polynomials), np.sqrt(norms)
+        )
+
+    polynomials = polynomials.reshape((len(dist), np.max(order) + 1))
+
+    order = np.array(order)
+    if len(dist) > 1:
+        polynomials = numpoly.prod(
+            cp.polynomial([poly[idx] for poly, idx in zip(polynomials, alpha)]),
+            0,
+        )
+    else:
+        polynomials = polynomials.flatten()
+
+    return polynomials
+
+
+def count_number_coeffs(p: int, d: int, q: float):
+    if abs(q - 1.0) < 1e-9:
+        count = math.comb(p + d, p)
+    else:
+        alpha = cp.glexindex(
+            start=0,
+            stop=p + 1,
+            dimensions=d,
+            cross_truncation=q,
+        )
+        count = alpha.shape[0]
+
+    return count
+
+
+def generate_polynomials(config: SensitivityConfiguration, rule: str = "ttr"):
     stop = config.order + 1
     dimension = config.distribution.lower.shape[0]
     trunc = config.cross_truncation
@@ -42,8 +93,25 @@ def generate_polynomials(config: SensitivityConfiguration):
         reverse=True,
     ).T
 
-    polynomials = generate_expansion_from_alpha(alpha, config)
+    polynomials = generate_expansion_from_alpha(alpha, config.distribution, rule)
+
     return alpha, polynomials
+
+
+def generate_expansion_from_alpha(alpha, distribution, rule: str):
+    qs = cp.variable(len(distribution))
+    order = np.max(np.sum(alpha, axis=0))
+    polyno = cp.prod(
+        [
+            cp.generate_expansion(order, distribution[idx], normed=True, rule=rule)[
+                alpha[idx]
+            ](**{"q0": qs[idx]})
+            for idx in range(len(distribution))
+        ],
+        axis=0,
+    )
+
+    return polyno
 
 
 def curate_none_evaluations(
@@ -72,10 +140,10 @@ def curate_none_evaluations(
 
     assert all(isinstance(result, np.ndarray) for result in evaluations)
     curated_evaluations: list[np.ndarray] = evaluations  # type: ignore
-    time = curated_evaluations[0][:, 0]
+    times = curated_evaluations[0][:, 0]
     evals = [result[:, 1] for result in curated_evaluations]
 
-    return time, evals
+    return times, evals
 
 
 def curate_cutoff_evaluations(
@@ -145,10 +213,8 @@ def pce_spectral(
     )
 
 
-def pq_lars_loo_cv(
-    samples,
-    evals: list[np.ndarray],
-    config: SensitivityConfiguration,
+def pq_loo_cv(
+    samples, evals: list[np.ndarray], config: SensitivityConfiguration, method: Callable
 ):
     """
     This algorithm uses Hybrid-LARS for sparse signal regression with Leave-One-Out Error CV.
@@ -176,58 +242,9 @@ def pq_lars_loo_cv(
         poly_evals = polynomial(*samples).T
         # Loop over targets
         for i in range(ntrgt):
-            cveloo, uhat = sp_loo_cv(poly_evals, evaluations[:, i])
+            cveloo, uhat = method(poly_evals, evaluations[:, i])
 
-            idnonzero = uhat != 0 
-
-            errors[qpc][i] = cveloo
-            fourier[qpc][i] = uhat
-            polyno[qpc][i] = polynomial * idnonzero
-            alphas_[qpc][i] = alphas[qpc] * idnonzero
-
-        logging.info(
-            f"LARS: Norm: {qpc[0]} Order: {qpc[1]} Mean-ELOO: {np.mean(errors[qpc]):.4f} Cardinality: {np.mean([np.count_nonzero(pol) for pol in polyno[qpc]])} - {qpc[2]}")
-
-    min_qpc = [min(errors, key=lambda k: errors[k][i]) for i in range(n)]
-    minfourier = [fourier[k][i] for i, k in enumerate(min_qpc)]
-    minpolynomials = [polyno[k][i] for i, k in enumerate(min_qpc)]
-    minalphas = [alphas_[k][i] for i, k in enumerate(min_qpc)]
-    minsurrogates = numpoly.aspolynomial([numpoly.sum(poly * fouri) for poly, fouri in zip(minpolynomials, minfourier)])
-
-    return minalphas, minpolynomials, minfourier, minsurrogates
-
-
-def pq_sp_loo_cv(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
-    """
-    This algorithm uses Subspace Pursuit for sparse signal regression with Leave-One-Out Error CV.
-    It uses PQ-basis adaptivity for best model selection, minimizing the Leave-One-Out Error again.
-    We run all combinations of PQ, we will add a break if CV error goes up later.
-
-    samples: Experimental design. (nsamples, nfeatures)
-    evals: Model evaluations. (nsamples, ntargets)
-    config: SensitivityConfiguration class
-    """
-
-    evaluations = np.asarray(evals)
-
-    # Problem dimensions
-    n = evaluations.shape[0]
-    ntrgt = evaluations.shape[1]
-
-    polynomials, alphas = generate_pq_basis(config)
-
-    errors = {k: [0] * ntrgt for k in polynomials.keys()}
-    fourier = {k: [0] * ntrgt for k in polynomials.keys()}
-    polyno = {k: [0] * ntrgt for k in polynomials.keys()}
-    alphas_ = {k: [0] * ntrgt for k in polynomials.keys()}
-    for qpc, polynomial in polynomials.items():
-        poly_evals = polynomial(*samples).T
-        
-        # Loop over targets
-        for i in range(ntrgt):
-            cveloo, uhat = sp_loo_cv(poly_evals, evaluations[:, i])
-
-            idnonzero = uhat != 0 
+            idnonzero = uhat != 0
 
             errors[qpc][i] = cveloo
             fourier[qpc][i] = uhat
@@ -235,20 +252,25 @@ def pq_sp_loo_cv(samples, evals: list[np.ndarray], config: SensitivityConfigurat
             alphas_[qpc][i] = alphas[qpc] * idnonzero
 
         logging.info(
-            f"SP: Norm: {qpc[0]} Order: {qpc[1]} Mean-ELOO: {np.mean(errors[qpc]):.4f} Cardinality: {np.mean([np.count_nonzero(pol) for pol in polyno[qpc]])} - {qpc[2]}")
+            f"REGRESSION: Norm: {qpc[0]} Order: {qpc[1]} Mean-ELOO: {np.mean(errors[qpc]):.4f} Cardinality: {np.mean([np.count_nonzero(pol) for pol in polyno[qpc]])} - {qpc[2]}"
+        )
 
     min_qpc = [min(errors, key=lambda k: errors[k][i]) for i in range(n)]
     minfourier = [fourier[k][i] for i, k in enumerate(min_qpc)]
     minpolynomials = [polyno[k][i] for i, k in enumerate(min_qpc)]
     minalphas = [alphas_[k][i] for i, k in enumerate(min_qpc)]
-    minsurrogates = numpoly.aspolynomial([numpoly.sum(poly * fouri) for poly, fouri in zip(minpolynomials, minfourier)])
+    minsurrogates = numpoly.aspolynomial(
+        [numpoly.sum(poly * fouri) for poly, fouri in zip(minpolynomials, minfourier)]
+    )
 
     return minalphas, minpolynomials, minfourier, minsurrogates
 
 
-def fn_lars_loo_cv(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
+def fn_loo_cv(
+    samples, evals: list[np.ndarray], config: SensitivityConfiguration, method: Callable
+):
     """
-    This algorithm uses Subspace Pursuit for sparse signal regression with Leave-One-Out Error CV.
+    This algorithm uses LARS for sparse signal regression with Leave-One-Out Error CV.
     It uses Forward Neighbors for the best model selection, also minimizing the Leave-One-Out Error
     We follow J. Jakeman's paper 2015
 
@@ -263,35 +285,47 @@ def fn_lars_loo_cv(samples, evals: list[np.ndarray], config: SensitivityConfigur
     n = evaluations.shape[0]
     ntrgt = evaluations.shape[1]
 
-    # Initialize basis to have q=1 and a cardinality closest to 10*n 
-    alpha, polynomial = generate_fn_basis([], 10*n, config) 
+    # Initialize basis to have q=1 and a cardinality closest to 10*n
+    alpha, polynomial = generate_fn_basis(None, 10 * n, config)
     poly_evals = polynomial(*samples).T
 
     # Loop over targets
+    eloos = [np.inf] * ntrgt
+    polynomials = [polynomial] * ntrgt
+    fouriers = [0] * ntrgt
+    surrogates = [0] * ntrgt
+    alphas = [alpha] * ntrgt
     for i in range(ntrgt):
-        cveloo_min = np.inf
-        cveloo, uhat = lars_loo_cv(poly_evals, evaluations[:, i])
-        while cveloo > cveloo_min:
-            cveloo = np.inf
-            alphak0 = alpha[uhat != 0]  
+        cvelook, uhatk = method(poly_evals, evaluations[:, i])
+        alphak = alphas[i] * uhatk
+        polynomialk = polynomials[i] * uhatk
+        while cvelook < eloos[i]:
+            eloos[i] = cvelook
+            polynomials[i] = polynomialk
+            alphas[i] = alphak
+            fouriers[i] = uhatk
+            surrogates[i] = numpoly.sum(polynomialk * uhatk)
+
+            cvelook = np.inf
+            alphakt = alphak[:, uhatk != 0]
             for t in range(3):
-                pass
+                new_alpha = generate_fn_basis(alphakt, 1, config)
+                alphakt = np.hstack((alphakt, new_alpha))
+                polynomialkt = generate_expansion_from_alpha(
 
-        idnonzero = uhat != 0
+                    alphakt, config.distribution, "ttr"
+                )
+                poly_evalkt = polynomialkt(*samples).T
+                cvelookt, uhatkt = method(poly_evalkt, evaluations[:, i])
 
-
-
-
-    errors = {0: [0] * ntrgt}
-    fourier = {k: [0] * ntrgt for k in polynomials.keys()}
-    polyno = {k: [0] * ntrgt for k in polynomials.keys()}
-    alphas_ = {k: [0] * ntrgt for k in polynomials.keys()}
-
-
-
-
+                if cvelookt < cvelook:
+                    cvelook = cvelookt
+                    uhatk = uhatkt
+                    alphak = alphakt
+                    polynomialk = polynomialkt
 
     pass
+
 
 def lars_loo_cv(X, y):
     """
@@ -308,7 +342,7 @@ def lars_loo_cv(X, y):
 
     lars = Lars(fit_intercept=False, n_nonzero_coefs=N - 1)
     lars.fit(X, y)
-    for uhat in enumerate(lars.coef_path_.T[1:]):
+    for uhat in lars.coef_path_.T[1:]:
         idnonzero = uhat != 0
         eloo = get_eloo(X[:, idnonzero], uhat[idnonzero], y)
 
@@ -325,7 +359,7 @@ def lars_loo_cv(X, y):
             break
 
     return eloo_min, uhat_min
-    
+
 
 def sp_loo_cv(X, y):
     """
@@ -341,7 +375,7 @@ def sp_loo_cv(X, y):
     eloo_min = np.inf
     uhat_min = np.zeros(X.shape[1], dtype=float)
     count_eloo = 0
-    for K in range(min(int(N/2), int(P/2)) + 1):
+    for K in range(min(int(N / 2), int(P / 2)) + 1):
         uhat = subspace_pursuit(K, X, y)
 
         idnonzero = uhat != 0
@@ -368,7 +402,8 @@ def subspace_pursuit(K, X, y):
     X: (nsamples, nfeatures) shapes measurement matrix
     y: (nsamples, ) measurements
 
-    This method is an own implementation of what is included in Diaz 2018, uses LOO CV with OLS feeting"""
+    This method is an own implementation of what is included in Diaz 2018, uses LOO CV with OLS feeting
+    """
 
     uhat = np.zeros(X.shape[1], dtype=float)
     max_iter = X.shape[1]
@@ -433,11 +468,7 @@ def get_eloo(X, x, y):
     h = (X @ I_ATA @ X.T).diagonal()
     hi = 1.0 - h
 
-    tpn = (
-        float(n)
-        * (1.0 + np.trace(I_ATA))
-        / (float(n) - float(X.shape[1]))
-    )
+    tpn = float(n) * (1.0 + np.trace(I_ATA)) / (float(n) - float(X.shape[1]))
 
     # Leave One Out Error
     residual = (y - X @ x) / hi
@@ -453,37 +484,49 @@ def generate_fn_basis(alpha, N: int, config: SensitivityConfiguration):
     fn_config.cross_truncation = 1.0
     d = fn_config.distribution.lower.shape[0]
 
-    if not alpha:
-        combinations = [abs(math.comb(p + d, p) - N) for p in range(1, 20)]
+    if alpha is None:
+        combinations = [abs(count_number_coeffs(p, d, 1.0) - N) for p in range(1, 20)]
         order = combinations.index(min(combinations))
         fn_config.order = order
         alpha, polyno = generate_polynomials(fn_config)
 
         return alpha, polyno
 
-    II = np.eye(d, d)
-    
+    II = np.eye(d, d, dtype=int)
+
     # Calculate all possible forward neighboughrs
     I_NEW = II[np.newaxis, :, :]
-    FWD = (I_NEW + alpha.T[:, np.newaxis, :]).reshape(d*alpha.shape[1], d)
-    FWD_UQ = np.unique(FWD, axis=0)
+    FWD = (I_NEW + alpha.T[:, np.newaxis, :]).reshape(d * alpha.shape[1], d)
+
+    # Get all unique elements that are not already in alpha
+    FWD = np.unique(FWD, axis=0)
+    mask = ~np.any(np.all(FWD[:, np.newaxis] == alpha.T, axis=2), axis=1)
+    FWD_UQ = FWD[mask]
+
     BWD = FWD_UQ[:, np.newaxis, :] - I_NEW
 
-    comparison = BWD[:, :, :, np.newaxis] == alpha[:, np.newaxis, :]
-    contained = np.all(np.any(comparison, axis=-1), axis=2)
+    comparison = BWD[:, :, np.newaxis, :] == alpha.T[np.newaxis, :, :]
+    contained = np.any(np.all(comparison, axis=-1), axis=-1)
     idx = np.where(np.all(contained, axis=1))[0]
 
-    return FWD_UQ[idx]    
+    return FWD_UQ[idx].T
 
 
 def generate_pq_basis(config: SensitivityConfiguration):
     if "polynomials_pq.pkl" not in os.listdir(os.getcwd()):
         # Create all expansions and eliminate duplicates first
         config_loop = copy.deepcopy(config)
+        d = config_loop.distribution.lower.shape[0]
         alphas_pq = {}
         polynomials_pq = {}
         for q in np.linspace(0.5, 1, 5):
             for p in range(config.minorder, config.order + 1):
+                if count_number_coeffs(p, d, q) > config_loop.max_size:
+                    logging.info(
+                        f"LARS: Polynomial of p: {p} d: {d} q: {q} is too big > {config_loop.max_size}"
+                    )
+                    break
+
                 config_loop.order = p
                 config_loop.cross_truncation = q
                 alpha, polynomials = generate_polynomials(config_loop)
@@ -493,12 +536,15 @@ def generate_pq_basis(config: SensitivityConfiguration):
         uq_polynomials_pq = {}
         for key, value in polynomials_pq.items():
             if not any(
-                (value == v).all() if len(value) == len(v) else False for v in uq_polynomials_pq.values() 
+                (value == v).all() if len(value) == len(v) else False
+                for v in uq_polynomials_pq.values()
             ):
                 uq_polynomials_pq[key] = value
 
-        uq_sorted_polynomials_pq = dict(sorted(uq_polynomials_pq.items(), key=lambda qpc: qpc[0][2]))
-        
+        uq_sorted_polynomials_pq = dict(
+            sorted(uq_polynomials_pq.items(), key=lambda qpc: qpc[0][2])
+        )
+
         with open("polynomials_pq.pkl", "wb") as file:
             pickle.dump(uq_sorted_polynomials_pq, file)
         with open("alphas_pq.pkl", "wb") as file:
@@ -511,21 +557,6 @@ def generate_pq_basis(config: SensitivityConfiguration):
             alphas_pq = pickle.load(file)
 
     return uq_sorted_polynomials_pq, alphas_pq
-
-
-def generate_expansion_from_alpha(alpha, config):
-    qs = cp.variable(len(config.distribution))
-    polyno = cp.prod(
-        [
-            cp.generate_expansion(config.order, config.distribution[idx], normed=True)[
-                alpha[idx]
-            ](**{"q0": qs[idx]})
-            for idx in range(len(config.distribution))
-        ],
-        axis=0,
-    )
-
-    return polyno
 
 
 def get_analytical_sobol(fouriers, alphas, config: SensitivityConfiguration):
@@ -700,10 +731,18 @@ def get_sa_from_experiment(
 
     if method == "pce":
         alpha, polyno, fourier, surrogate = pce(samples_r, ys, sens_cfg_copy)
-    elif method == "lars":
-        alpha, polyno, fourier, surrogate = pq_lars_loo_cv(samples_r, ys, sens_cfg_copy)
-    elif method == "sp":
-        alpha, polyno, fourier, surrogate = pq_sp_loo_cv(samples_r, ys, sens_cfg_copy)
+    elif method == "pq-lars-loo":
+        alpha, polyno, fourier, surrogate = pq_loo_cv(
+            samples_r, ys, sens_cfg_copy, lars_loo_cv
+        )
+    elif method == "pq-sp-loo":
+        alpha, polyno, fourier, surrogate = pq_loo_cv(
+            samples_r, ys, sens_cfg_copy, sp_loo_cv
+        )
+    elif method == "fn-lars-loo":
+        alpha, polyno, fourier, surrogate = fn_loo_cv(
+            samples_r, ys, sens_cfg_copy, lars_loo_cv
+        )
     elif method == "project":
         alpha, polyno, fourier, surrogate = pce_spectral(
             samples_r, weights, ys, sens_cfg_copy
@@ -715,7 +754,9 @@ def get_sa_from_experiment(
             )
         sobol = analyzer(problem, ys, print_to_console=False)
     else:
-        raise ValueError("method variable must be 'pce', 'project', 'salib', 'lars', or 'sp'")
+        raise ValueError(
+            "method variable must be 'pce', 'project', 'salib', 'pq-lars-loo', 'pq-sp-loo', or 'fn-lars-loo'"
+        )
 
     if method == "salib":
         print(sobol)
