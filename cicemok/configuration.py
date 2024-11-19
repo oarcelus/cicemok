@@ -37,7 +37,7 @@ class ComsolConfiguration:
 @dataclasses.dataclass
 class SensitivityConfiguration:
     distribution: cp.J
-    order: int
+    order: int = 1
     rule: str = "latin_hypercube"
     minorder: int = 1
     cross_truncation: float = 1.0
@@ -46,4 +46,5 @@ class SensitivityConfiguration:
     sobol_total: bool = False
     sobol_second: bool = False
     max_size: int = 25000
+    early_stop: bool = True
     

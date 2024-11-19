@@ -1,8 +1,10 @@
-bayesian_optimization==1.4.3
-chaospy==4.3.13
-mph==1.2.3
-numpy==1.26.4
-setuptools==68.2.2
-pymatgen==2024.3.1
-Py-BOBYQA==1.4.1
+bayesian_optimization
+pandas
+chaospy
+scikit-learn
+mph
+numpy
+setuptools
+pymatgen
+Py-BOBYQA
 SALib

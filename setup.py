@@ -17,7 +17,7 @@ setup(
     author="oarcelus",
     packages=find_packages(),
     long_description=long_description,
-#    install_requires=required,
+    install_requires=required,
     classifiers=[
         "Programming Language :: Python",
         "Programming Language :: Python :: 3.11",
