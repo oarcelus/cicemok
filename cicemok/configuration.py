@@ -1,6 +1,8 @@
 import dataclasses
 import numpy as np
 import chaospy as cp
+import UQpy as uq
+from typing import Union
 
 
 @dataclasses.dataclass
@@ -36,7 +38,7 @@ class ComsolConfiguration:
 
 @dataclasses.dataclass
 class SensitivityConfiguration:
-    distribution: cp.J
+    distribution: Union[cp.J, uq.distributions.JointIndependent]
     order: int = 1
     rule: str = "latin_hypercube"
     minorder: int = 1
