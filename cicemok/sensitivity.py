@@ -1,23 +1,20 @@
 import copy
 import math
 import logging
-import multiprocessing
 import os
 import pickle
-import time
 from typing import Callable
 from functools import partial
 
-import chaospy as cp
-import matplotlib.pyplot as plt
-import mph
-import numpoly
 import numpy as np
 from SALib import ProblemSpec
 from SALib.analyze import sobol as analyzer
 from SALib.sample import sobol as sampler
 from scipy import interpolate
 from sklearn.linear_model import Lars, OrthogonalMatchingPursuit
+
+import UQpy.surrogates as surrogates
+import UQpy.sampling as sampling
 
 from cicemok import comsol
 from cicemok.configuration import (
@@ -26,66 +23,23 @@ from cicemok.configuration import (
 )
 
 
-def count_number_coeffs(p: int, d: int, q: float):
-    if abs(q - 1.0) < 1e-9:
-        count = math.comb(p + d, p)
-    else:
-        alpha = cp.glexindex(
-            start=0,
-            stop=p + 1,
-            dimensions=d,
-            cross_truncation=q,
-        )
-        count = alpha.shape[0]
-
-    return count
-
-
 def generate_polynomials(config: SensitivityConfiguration):
-    stop = config.order + 1
-    dimension = config.distribution.lower.shape[0]
+    dimension = len(config.distribution.marginals)
     trunc = config.cross_truncation
 
-    alpha = cp.glexindex(
-        start=0,
-        stop=stop,
-        dimensions=dimension,
-        cross_truncation=trunc,
-        graded=True,
-        reverse=True,
-    ).T
-
+    alpha = surrogates.PolynomialBasis.calculate_hyperbolic_set(dimension, config.order, trunc)
     polynomials = generate_expansion_from_alpha(alpha, config.distribution)
 
-    return alpha, polynomials
+    return polynomials
 
 
 def generate_expansion_from_alpha(
     alpha,
     dist,
 ):
-    """
-    Modified version of cp.expansion.stieltjes to directly accept lexicographical indexing
-
-    """
-    order = np.max(np.sum(alpha, axis=0))
-    (
-        _,
-        polynomials,
-        norms,
-    ) = cp.stieltjes(np.max(order), dist)
-    polynomials = numpoly.true_divide(numpoly.polynomial(polynomials), np.sqrt(norms))
-
-    polynomials = polynomials.reshape((len(dist), np.max(order) + 1))
-
-    order = np.array(order)
-    if len(dist) > 1:
-        polynomials = numpoly.prod(
-            cp.polynomial([poly[idx] for poly, idx in zip(polynomials, alpha)]),
-            0,
-        )
-    else:
-        polynomials = polynomials.flatten()
+    dimension = len(dist.marginals)
+    basis = surrogates.PolynomialBasis.construct_arbitrary_basis(dimension, dist, alpha)
+    polynomials = surrogates.PolynomialBasis(dimension, len(alpha), alpha, basis, dist)
 
     return polynomials
 
@@ -104,7 +58,7 @@ def curate_none_evaluations(
     count = 0
     while idxs:
         closeidx = [
-            np.argsort(np.linalg.norm(samples.T - samples.T[idx], axis=1))[1 + count]
+            np.argsort(np.linalg.norm(samples - samples[idx], axis=1))[1 + count]
             for idx in idxs
         ]
 
@@ -138,7 +92,7 @@ def curate_cutoff_evaluations(
     count = 0
     while idxs:
         closeidx = [
-            np.argsort(np.linalg.norm(samples.T - samples.T[idx], axis=1))[1 + count]
+            np.argsort(np.linalg.norm(samples - samples[idx], axis=1))[1 + count]
             for idx in idxs
         ]
 
@@ -164,26 +118,15 @@ def evaluate_models_pool(pool, samples: np.ndarray, config: ComsolConfiguration)
 
 
 def pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
-    alpha, polyno = generate_polynomials(config)
-    surrogate, fourier = cp.fit_regression(polyno, samples, evals, retall=True)
+    polyno = generate_polynomials(config)
+
+    X = polyno.evaluate_basis(samples)
+    y = np.asarray(evals)
+    uhat = np.linalg.lstsq(X, y, rcond=None)[0]
 
     return (
-        np.array([alpha] * len(surrogate)),
-        fourier.T,
-        surrogate,
-    )
-
-
-def pce_spectral(
-    samples, weights, evals: list[np.ndarray], config: SensitivityConfiguration
-):
-    alpha, polyno = generate_polynomials(config)
-    surrogate, fourier = cp.fit_quadrature(polyno, samples, weights, evals, retall=True)
-
-    return (
-        np.array([alpha] * len(surrogate)),
-        fourier.T,
-        surrogate,
+        polyno,
+        uhat.T,
     )
 
 
@@ -626,9 +569,9 @@ def get_analytical_variance(fouriers, alphas):
     return np.sum(np.array(fouriers)[:, 1:] ** 2, axis=1)
 
 def get_analytical_sobol(fouriers, alphas, config: SensitivityConfiguration):
-    dimension = config.distribution.lower.shape[0]
+    dimension = len(config.distribution.marginals)
     ntrgt = len(fouriers)
-    d_hat = np.array([np.sum(fourier**2) for fourier in fouriers])
+    d_hat = get_analytical_variance(fouriers, alphas)
 
     sens_t_hat = None
     if config.sobol_total:
@@ -679,18 +622,7 @@ def get_sampling_from_experiment(
     pool,
     method: str = "pce",
 ):
-    distribution_q = config.distribution
-    distribution_r = cp.J(
-        *[cp.Uniform(-1, 1) for _ in range(distribution_q.lower.shape[0])]
-    )
-
-    if method == "project":
-        samples_r, weights = cp.generate_quadrature(
-            nsamples, distribution_r, rule=config.rule, sparse=True
-        )
-        samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
-        problem = None
-    elif method == "salib":
+    if method == "salib":
         if config.rule != "sobol":
             raise ValueError(
                 "'rule' in ComsolConfiguration must be 'sobol' if method = 'salib'"
@@ -698,21 +630,19 @@ def get_sampling_from_experiment(
 
         sp = {
             "names": experiment.names,
-            "bounds": [[-1.0, 1.0]] * distribution_r.lower.shape[0],
+            "bounds": [[-1.0, 1.0]] * len(config.distribution.marginals),
             "num_vars": len(experiment.names),
         }
 
-        samples_r = sampler.sample(sp, nsamples, calc_second_order=config.sobol_second)
-        samples_q = distribution_q.inv(distribution_r.fwd(samples_r.T))
-        weights = None
+        samples_q = sampling.LatinHypercubeSampling(distributions=config.distribution, nsamples=nsamples).samples
+        samples_r = surrogates.Polynomials.standardize_sample(samples_q, config.distribution)
         problem = sp
     else:
-        samples_r = distribution_r.sample(nsamples, rule=config.rule)
-        samples_q = distribution_q.inv(distribution_r.fwd(samples_r))
-        weights = None
+        samples_q = sampling.LatinHypercubeSampling(distributions=config.distribution, nsamples=nsamples).samples
+        samples_r = surrogates.Polynomials.standardize_sample(samples_q, config.distribution)
         problem = None
 
-    evals = evaluate_models_pool(pool, samples_q, experiment)
+    evals = evaluate_models_pool(pool, samples_q.T, experiment)
     nevb = len(evals)
 
     # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
@@ -747,28 +677,25 @@ def get_sampling_from_experiment(
             "You are trying to use method from SALib with a sobol sampler for failed evaluations"
         )
 
-    x, ys = curate_none_evaluations(evals, samples_q)
+    x, ys = curate_none_evaluations(evals, samples_r)
 
-    return samples_r, x, ys, weights, problem
+    return samples_r, samples_q, x, ys, problem
 
 
 def get_sa_from_experiment(
     samples,
     y,
-    weights,
     problem,
     config: SensitivityConfiguration,
     method: str = "pce",
 ):
-    assert (method == "project" and weights is not None) or (
-        method != "project" and weights is None
-    )
     assert (method == "salib" and problem is not None) or (
         method != "salib" and problem is None
     )
 
     if method == "pce":
-        alpha, fourier, surrogate = pce(samples, y, config)
+        polyno, fourier = pce(samples, y, config)
+        alpha = [polyno.multi_index_set.T for _ in range(len(fourier))]
     elif method == "pq-lars-loo":
         alpha, fourier, surrogate = pq_loo_cv(samples, y, config, lars_loo_cv)
     elif method == "pq-omp-loo":
@@ -777,8 +704,6 @@ def get_sa_from_experiment(
         alpha, fourier, surrogate = pq_loo_cv(samples, y, config, sp_loo_cv)
     elif method == "fn-lars-loo":
         alpha, fourier, surrogate = fn_loo_cv(samples, y, config, lars_loo_cv)
-    elif method == "project":
-        alpha, fourier, surrogate = pce_spectral(samples, weights, y, config)
     elif method == "salib":
         if config.rule != "sobol":
             raise ValueError(
@@ -801,6 +726,6 @@ def get_sa_from_experiment(
 
     if method == "salib":
         return sobol
-    else:
+    else: 
         sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, config)
-        return fourier, surrogate, alpha, sobol, sobol_2, sobol_t
+        return fourier, polyno, alpha, sobol, sobol_2, sobol_t
