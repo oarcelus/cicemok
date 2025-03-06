@@ -1,8 +1,9 @@
 import copy
-import multiprocessing
+import math
 import logging
 import os
 import pickle
+import dill
 from typing import Callable
 from functools import partial
 
@@ -23,7 +24,6 @@ from cicemok.configuration import (
     SensitivityConfiguration,
 )
 
-PRECOMPUTED_POLYNOMIALS = None
 
 def generate_polynomials(config: SensitivityConfiguration):
     dimension = len(config.distribution.marginals)
@@ -188,81 +188,11 @@ def precompute_polynomial_bases(
     return precomputed
 
 
-def pq_loo_init_worker(precomputed_polys: dict, event: multiprocessing.Event):
-    """
-    Initializer for worker processes. Sets a global variable.
-    
-    Parameters
-    ----------
-    precomputed_polys : dict
-        The precomputed polynomial bases that can be large.
-    """
-    global PRECOMPUTED_POLYNOMIALS
-    PRECOMPUTED_POLYNOMIALS = precomputed_polys
-    logging.info(f"Worker (PID {os.getpid()}) initialized with precomputed polynomials.")
-    event.set()
-    
-
-def pq_loo_worker(i, evaluations, method):
-    """
-    Worker function to compute the best regression model for a single target.
-    
-    Parameters
-    ----------
-    i : int
-        The target index.
-    evaluations : np.ndarray
-        Array of model evaluations of shape (nsamples, ntargets).
-    method : Callable
-        The regression method that takes (poly_evals, target_data) and returns
-        (cveloo, uhat).
-        
-    Returns
-    -------
-    tuple
-        A tuple (best_polynomial, best_regression) corresponding to target i.
-    """
-    logging.info(f"Worker started for target {i}")
-    cveloo_old = np.inf
-    best_regression = None
-    best_polynomial = None
-
-    global PRECOMPUTED_POLYNOMIALS
-    if PRECOMPUTED_POLYNOMIALS is None:
-        logging.error("PRECOMPUTED_POLYNOMIALS is not set in worker!")
-        return None, None
-
-    # Iterate over all precomputed (p, q) combinations
-    for (p, q), (polynomial, poly_evals) in PRECOMPUTED_POLYNOMIALS.items():
-        try:
-            cveloo, uhat = method(poly_evals, evaluations[:, i])
-        except Exception as e:
-            logging.exception(f"Error processing target {i} for polynomial (p={p}, q={q}): {e}")
-            continue
-
-        if cveloo < cveloo_old:
-            cveloo_old = cveloo
-            best_regression = uhat
-            best_polynomial = polynomial
-            logging.info(
-                f"Target {i}: Updated: Order {p}, Norm {q:.3f}, Mean-ELOO {cveloo:.4f}, "
-                f"Cardinality {np.count_nonzero(uhat)}"
-            )
-        else:
-            logging.info(
-                f"Target {i}: Not improved: Order {p}, Norm {q:.3f}, Mean-ELOO {cveloo:.4f}"
-            )
-
-    logging.info(f"Worker finished for target {i}")
-    return best_polynomial, best_regression
-
-
 def pq_loo_cv(
     samples: np.ndarray,
     evals: list[np.ndarray],
     config: SensitivityConfiguration,
     method: Callable,
-    pool,
 ):
     """
     Run sparse signal regression with Leave-One-Out Error CV across multiple targets,
@@ -280,8 +210,6 @@ def pq_loo_cv(
         A regression method that takes (poly_evals, target_data) as inputs and returns
         (cveloo, uhat), where cveloo is the Leave-One-Out error and uhat is the regression
         coefficients or model output.
-    pool : multiprocess.Pool
-        A multiprocess pool for parallel processing with dill seriallization.
 
     Returns
     -------
@@ -295,14 +223,38 @@ def pq_loo_cv(
     logging.info(f"REGRESSION: nsamples {n} ntargets: {ntrgt}")
 
     # Precompute the polynomial bases
-    worker = partial(
-        pq_loo_worker,
-        evaluations=evaluations,
-        method=method
-    )
+    precomputed_polynomials = precompute_polynomial_bases(samples, config)
 
-    results = pool.map(worker, range(ntrgt))
-    best_polynomials, best_regressions = zip(*results)
+    # Initialize the storage for best models per target
+    best_regressions = [None] * ntrgt
+    best_polynomials = [None] * ntrgt
+
+    # Loop over each target
+    for i in range(config.istart, ntrgt):
+        cveloo_old = np.inf
+
+        # Iterate over all precomputed (p, q) combinations
+        for (p, q), (polynomial, poly_evals) in precomputed_polynomials.items():
+            cveloo, uhat = method(poly_evals, evaluations[:, i])
+            if cveloo < cveloo_old:
+                cveloo_old = cveloo
+                best_regressions[i] = uhat
+                best_polynomials[i] = polynomial
+                logging.info(
+                    f"REGRESSION: Nsamples: {n} Norm: {q:.3f} Order: {p} Mean-ELOO: {cveloo:.4f} "
+                    f"Target ID: {i} Cardinality: {np.count_nonzero(uhat)} - {len(uhat)} - UPDATED"
+                )
+            else:
+                logging.info(
+                    f"REGRESSION: Nsamples: {n} Norm: {q:.3f} Order: {p} Mean-ELOO: {cveloo:.4f} "
+                    f"Target ID: {i} Cardinality: {np.count_nonzero(uhat)} - {len(uhat)} - ELOO NOT IMPROVED"
+                )
+
+        with open(f"temporary_regression_target{i}.pkl", "wb") as file:
+            dill.dump(best_regressions[i], file)
+
+        with open(f"temporary_polyno_target{i}.pkl", "wb") as file:
+            dill.dump(best_polynomials[i], file)
 
     return best_polynomials, best_regressions
 
@@ -848,7 +800,6 @@ def get_sa_from_experiment(
     y,
     problem,
     config: SensitivityConfiguration,
-    pool,
     method: str = "pce",
 ):
     assert (method == "salib" and problem is not None) or (
@@ -859,13 +810,13 @@ def get_sa_from_experiment(
         polyno, fourier = pce(samples, y, config)
         alpha = [polyno.multi_index_set.T for _ in range(len(fourier))]
     elif method == "pq-lars-loo":
-        polyno, fourier = pq_loo_cv(samples, y, config, lars_loo_cv, pool)
+        polyno, fourier = pq_loo_cv(samples, y, config, lars_loo_cv)
         alpha = [pol.multi_index_set.T for pol in polyno]
     elif method == "pq-omp-loo":
-        polyno, fourier = pq_loo_cv(samples, y, config, omp_loo_cv, pool)
+        polyno, fourier = pq_loo_cv(samples, y, config, omp_loo_cv)
         alpha = [pol.multi_index_set.T for pol in polyno]
     elif method == "pq-sp-loo":
-        polyno, fourier = pq_loo_cv(samples, y, config, sp_loo_cv, pool)
+        polyno, fourier = pq_loo_cv(samples, y, config, sp_loo_cv)
         alpha = [pol.multi_index_set.T for pol in polyno]
     elif method == "fn-lars-loo":
         alpha, fourier, surrogate = fn_loo_cv(samples, y, config, lars_loo_cv)

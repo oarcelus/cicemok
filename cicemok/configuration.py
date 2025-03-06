@@ -48,5 +48,6 @@ class SensitivityConfiguration:
     sobol_total: bool = False
     sobol_second: bool = False
     max_size: int = 25000
-    early_stop: bool = True
+    istart: int = 0 # Index for the starting target (used for long calculation to build savefiles)
+    early_stop: bool = False
     

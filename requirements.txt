@@ -8,3 +8,5 @@ setuptools
 pymatgen
 Py-BOBYQA
 SALib
+TorchSisso
+multiprocess
