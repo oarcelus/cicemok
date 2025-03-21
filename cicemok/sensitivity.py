@@ -232,7 +232,7 @@ def pq_loo_worker(i, evaluations, method):
         logging.error("PRECOMPUTED_POLYNOMIALS is not set in worker!")
         return None, None
 
-    # Iterate over all precomputed (p, q) combinations
+    # Iterate over all precomputed (p, q) combinationspq_loo_ini
     for (p, q), (polynomial, poly_evals) in PRECOMPUTED_POLYNOMIALS.items():
         try:
             cveloo, uhat = method(poly_evals, evaluations[:, i])
