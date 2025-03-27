@@ -10,3 +10,4 @@ Py-BOBYQA
 SALib
 TorchSisso
 multiprocess
+UQPy
