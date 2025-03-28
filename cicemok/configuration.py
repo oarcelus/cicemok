@@ -1,4 +1,5 @@
 import dataclasses
+from dataclasses import field
 import numpy as np
 import chaospy as cp
 import UQpy as uq
@@ -48,6 +49,7 @@ class SensitivityConfiguration:
     sobol_total: bool = False
     sobol_second: bool = False
     max_size: int = 25000
-    istart: int = 0 # Index for the starting target (used for long calculation to build savefiles)
     early_stop: bool = False
+    idtargets: list = field(default_factory=list)
+    precomputed_poly: dict = field(default_factory=dict)
     
