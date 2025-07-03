@@ -156,7 +156,7 @@ def precompute_polynomial_bases(
         and 'poly_evals' is the result of evaluating its basis on the samples.
     """
     precomputed = {}
-    q_values = np.linspace(0.5, 1, 5)
+    q_values = np.linspace(0.5, config.cross_truncation, 5)
 
     logging.info("Starting precomputation of polynomial bases.")
     for q in q_values:
