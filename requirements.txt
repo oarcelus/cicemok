@@ -1,13 +1,12 @@
 bayesian_optimization
-pandas
-chaospy
-scikit-learn
+pandas==2.3.1
+chaospy==4.3.16
+scikit-learn==1.4.2
 mph
-numpy
+numpy==1.26.4
 setuptools
 pymatgen
 Py-BOBYQA
 SALib
-TorchSisso
 multiprocess
 UQPy
