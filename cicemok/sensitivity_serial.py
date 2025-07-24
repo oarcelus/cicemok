@@ -156,7 +156,7 @@ def precompute_polynomial_bases(
         and 'poly_evals' is the result of evaluating its basis on the samples.
     """
     precomputed = {}
-    q_values = np.linspace(0.5, config.cross_truncation, 5)
+    q_values = np.linspace(0.5, 1, 5)
 
     logging.info("Starting precomputation of polynomial bases.")
     for q in q_values:
@@ -223,22 +223,14 @@ def pq_loo_cv(
     logging.info(f"REGRESSION: nsamples {n} ntargets: {ntrgt}")
 
     # Precompute the polynomial bases
-    if config.precomputed_poly:
-        precomputed_polynomials = config.precomputed_poly
-    else:
-        precomputed_polynomials = precompute_polynomial_bases(samples, config)
+    precomputed_polynomials = precompute_polynomial_bases(samples, config)
 
     # Initialize the storage for best models per target
     best_regressions = [None] * ntrgt
     best_polynomials = [None] * ntrgt
 
-    if config.idtargets:
-        trgts = config.idtargets
-    else:
-        trgts = range(ntrgt)
-
     # Loop over each target
-    for i in trgts:
+    for i in range(config.istart, ntrgt):
         cveloo_old = np.inf
 
         # Iterate over all precomputed (p, q) combinations
@@ -257,6 +249,12 @@ def pq_loo_cv(
                     f"REGRESSION: Nsamples: {n} Norm: {q:.3f} Order: {p} Mean-ELOO: {cveloo:.4f} "
                     f"Target ID: {i} Cardinality: {np.count_nonzero(uhat)} - {len(uhat)} - ELOO NOT IMPROVED"
                 )
+
+        with open(f"temporary_regression_target{i}.pkl", "wb") as file:
+            dill.dump(best_regressions[i], file)
+
+        with open(f"temporary_polyno_target{i}.pkl", "wb") as file:
+            dill.dump(best_polynomials[i], file)
 
     return best_polynomials, best_regressions
 
@@ -813,13 +811,13 @@ def get_sa_from_experiment(
         alpha = [polyno.multi_index_set.T for _ in range(len(fourier))]
     elif method == "pq-lars-loo":
         polyno, fourier = pq_loo_cv(samples, y, config, lars_loo_cv)
-        alpha = [pol.multi_index_set.T if pol is not None else None for pol in polyno]
+        alpha = [pol.multi_index_set.T for pol in polyno]
     elif method == "pq-omp-loo":
         polyno, fourier = pq_loo_cv(samples, y, config, omp_loo_cv)
-        alpha = [pol.multi_index_set.T if pol is not None else None for pol in polyno]
+        alpha = [pol.multi_index_set.T for pol in polyno]
     elif method == "pq-sp-loo":
         polyno, fourier = pq_loo_cv(samples, y, config, sp_loo_cv)
-        alpha = [pol.multi_index_set.T if pol is not None else None for pol in polyno]
+        alpha = [pol.multi_index_set.T for pol in polyno]
     elif method == "fn-lars-loo":
         alpha, fourier, surrogate = fn_loo_cv(samples, y, config, lars_loo_cv)
     elif method == "salib":
@@ -844,8 +842,6 @@ def get_sa_from_experiment(
 
     if method == "salib":
         return sobol
-    elif all(pol is not None for pol in polyno) and all(fou is not None for fou in fourier):
+    else:
         sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, config)
         return fourier, polyno, alpha, sobol, sobol_2, sobol_t
-    else:
-        return fourier, polyno, alpha, None, None, None
