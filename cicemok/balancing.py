@@ -142,6 +142,7 @@ def balance_electrodes_q(
     cell_ocv: (N'', 2) numpy array with Capacity vs Voltage in full-cell
     c_host_p: Positive host capacity scaled to the 'cell_ocv' level
     c_host_n: Negative host capacity scaled to the 'cell_ocv' level
+    c_max: Available capacity of Li ions between positive and negative (depend on chg or dchg)
     """
     if method != "PSO":
         soln0_init = 0.0 
