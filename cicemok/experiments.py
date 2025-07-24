@@ -291,7 +291,7 @@ class ICIExperiment(Experiment):
 
             r = (cc[-1, 2] - yline[0]) / cc[-1, 3]
             relec = (cc[-1, 2] - rest[0, 1]) / cc[-1, 3]
-            rct = (cc[-1, 2] - x[0, 1]) / cc[-1, 3]
+            rct = (cc[-1, 2] - x[-1, 1]) / cc[-1, 3]
             k = -model.coef_[0] / cc[-1, 3]
 
             rs.append(r)
