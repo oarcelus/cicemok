@@ -18,9 +18,10 @@ from sklearn.linear_model import Lars, OrthogonalMatchingPursuit
 import UQpy.surrogates as surrogates
 import UQpy.sampling as sampling
 
-from cicemok import comsol
+from cicemok import comsol, pybammrun
 from cicemok.configuration import (
     ComsolConfiguration,
+    PybammConfiguration,
     SensitivityConfiguration,
 )
 
@@ -112,10 +113,15 @@ def curate_cutoff_evaluations(
     return evaluations
 
 
-def evaluate_models_pool(pool, samples: np.ndarray, config: ComsolConfiguration):
+def evaluate_models_pool(
+    pool, samples: np.ndarray, config: ComsolConfiguration | PybammConfiguration
+):
     samples_pool = [sample for sample in samples.T]
 
-    func = partial(comsol.comsol_worker_pool, config=config)
+    if isinstance(config, ComsolConfiguration):
+        func = partial(comsol.comsol_worker_pool, config=config)
+    elif isinstance(config, PybammConfiguration):
+        func = partial(pybammrun.pybamm_worker_pool, config=config)
     results = pool.map(func, samples_pool)
 
     return results
@@ -396,7 +402,9 @@ def omp_loo_cv(X, y):
     count_eloo = 0
 
     for K in range(1, min(N - 1, P)):
-        omp = OrthogonalMatchingPursuit(fit_intercept=False, n_nonzero_coefs=K, precompute=True)
+        omp = OrthogonalMatchingPursuit(
+            fit_intercept=False, n_nonzero_coefs=K, precompute=True
+        )
         omp.fit(X, y)
         uhat = omp.coef_
         idnonzero = uhat != 0
@@ -721,7 +729,7 @@ def get_sampling_from_experiment(
     ncores: int,
     nsamples: int,  # If project = True this is the order of the quadrature
     ninterp: int,
-    experiment: ComsolConfiguration,
+    experiment: ComsolConfiguration | PybammConfiguration,
     config: SensitivityConfiguration,
     exclude: float,
     pool,
@@ -730,7 +738,7 @@ def get_sampling_from_experiment(
     if method == "salib":
         if config.rule != "sobol":
             raise ValueError(
-                "'rule' in ComsolConfiguration must be 'sobol' if method = 'salib'"
+                "'rule' in SensitivityConfiguration must be 'sobol' if method = 'salib'"
             )
 
         sp = {
@@ -825,7 +833,7 @@ def get_sa_from_experiment(
     elif method == "salib":
         if config.rule != "sobol":
             raise ValueError(
-                "'rule' in ComsolConfiguration must be 'sobol' if method = 'salib'"
+                "'rule' in SensitivityConfiguration must be 'sobol' if method = 'salib'"
             )
         data = np.array(y).T
         sobol = [
@@ -844,7 +852,9 @@ def get_sa_from_experiment(
 
     if method == "salib":
         return sobol
-    elif all(pol is not None for pol in polyno) and all(fou is not None for fou in fourier):
+    elif all(pol is not None for pol in polyno) and all(
+        fou is not None for fou in fourier
+    ):
         sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, config)
         return fourier, polyno, alpha, sobol, sobol_2, sobol_t
     else:

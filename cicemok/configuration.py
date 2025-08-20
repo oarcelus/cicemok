@@ -4,6 +4,9 @@ import numpy as np
 import chaospy as cp
 import UQpy as uq
 from typing import Union
+import pybamm
+
+from pybamm.experiment.step import BaseStep
 
 
 @dataclasses.dataclass
@@ -35,6 +38,17 @@ class ComsolConfiguration:
     evname: str
     isocname: str 
     experiment: CurrentConfigurations | None = None
+
+
+@dataclasses.dataclass
+class PybammConfiguration:
+    names: list[str]
+    expression: list[str]
+    sto: list[float]
+    experiment: list[str | tuple[str] | pybamm.experiment.step.BaseStep]
+    isoc: float = 0.0
+    modeltype: str = "DFN"
+    parameter_set: str = "Chen2020"
 
 
 @dataclasses.dataclass
