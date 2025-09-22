@@ -8,7 +8,8 @@ from typing import Callable
 from functools import partial
 
 import numpy as np
-from TorchSisso import Regressor
+
+# from TorchSisso import Regressor
 from SALib import ProblemSpec
 from SALib.analyze import sobol as analyzer
 from SALib.sample import sobol as sampler
@@ -17,6 +18,7 @@ from sklearn.linear_model import Lars, OrthogonalMatchingPursuit
 
 import UQpy.surrogates as surrogates
 import UQpy.sampling as sampling
+from UQpy.transformations import Nataf
 
 from cicemok import comsol, pybammrun
 from cicemok.configuration import (
@@ -113,16 +115,35 @@ def curate_cutoff_evaluations(
     return evaluations
 
 
+def evaluate_models_threads(samples: np.ndarray, config: PybammConfiguration):
+    results = pybammrun.pybamm_samples_on_threads(samples, config)
+
+    return results
+
+
+def _indexed_worker(args: tuple[int, np.ndarray, PybammConfiguration]):
+    idx, sample, cfg = args
+    res = pybammrun.pybamm_worker_pool(sample, cfg)
+    return idx, res
+
+
 def evaluate_models_pool(
     pool, samples: np.ndarray, config: ComsolConfiguration | PybammConfiguration
 ):
-    samples_pool = [sample for sample in samples.T]
-
     if isinstance(config, ComsolConfiguration):
+        samples_pool = [sample for sample in samples.T]
         func = partial(comsol.comsol_worker_pool, config=config)
+        results = pool.map(func, samples_pool)
     elif isinstance(config, PybammConfiguration):
+        samples_pool = [sample for sample in samples.T]
+        # samples_pool = samples.T
+        # n = samples_pool.shape[0]
+        # results = [None] * n
+        # args = [(i, samples_pool[i], config) for i in range(n)]
+        # for idx, res in pool.imap_unordered(_indexed_worker, args, chunksize=1):
+        #     results[idx] = res
         func = partial(pybammrun.pybamm_worker_pool, config=config)
-    results = pool.map(func, samples_pool)
+        results = pool.map(func, samples_pool)
 
     return results
 
@@ -725,14 +746,12 @@ def get_analytical_sobol(fouriers, alphas, config: SensitivityConfiguration):
 
 
 def get_sampling_from_experiment(
-    npool: int,
-    ncores: int,
     nsamples: int,  # If project = True this is the order of the quadrature
     ninterp: int,
     experiment: ComsolConfiguration | PybammConfiguration,
     config: SensitivityConfiguration,
     exclude: float,
-    pool,
+    pool=None,
     method: str = "pce",
 ):
     if method == "salib":
@@ -747,13 +766,12 @@ def get_sampling_from_experiment(
             "num_vars": len(experiment.names),
         }
 
-        samples_q = sampling.LatinHypercubeSampling(
-            distributions=config.distribution, nsamples=nsamples
-        ).samples
-        samples_r = surrogates.Polynomials.standardize_sample(
-            samples_q, config.distribution
-        )
+        samples_r = sampler.sample(sp, nsamples, calc_second_order=config.sobol_second)
+        nat = Nataf(config.distribution, samples_z=samples_r)
+
+        samples_q = nat.samples_x
         problem = sp
+
     else:
         samples_q = sampling.LatinHypercubeSampling(
             distributions=config.distribution, nsamples=nsamples
@@ -763,13 +781,18 @@ def get_sampling_from_experiment(
         )
         problem = None
 
-    evals = evaluate_models_pool(pool, samples_q.T, experiment)
+    if pool is not None:
+        evals = evaluate_models_pool(pool, samples_q.T, experiment)
+    else:
+        evals = evaluate_models_threads(samples_q, experiment)
+
     nevb = len(evals)
 
     # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
     check_nones = any(v is None for v in evals)
+    count_nones = sum(x is None for x in evals)
     logging.info(
-        f"EVALUATIONS: Finished {len(evals)} evaluations, Nones -> {check_nones}"
+        f"EVALUATIONS: Finished {len(evals)} evaluations, {count_nones} Nones -> {check_nones}"
     )
     xinit = min([v[0, 0] for v in evals if v is not None and v[0, 0] > exclude])
     xfin = max([v[-1, 0] for v in evals if v is not None])

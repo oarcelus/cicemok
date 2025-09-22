@@ -46,8 +46,10 @@ class PybammConfiguration:
     expression: list[str]
     sto: list[float]
     experiment: list[str | tuple[str] | pybamm.experiment.step.BaseStep]
+    ncores: int = 1
     isoc: float = 0.0
     modeltype: str = "DFN"
+    solver_safety: bool = False
     parameter_set: str = "Chen2020"
 
 

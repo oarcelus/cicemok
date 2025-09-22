@@ -669,8 +669,6 @@ def get_analytical_sobol(fouriers, alphas, config: SensitivityConfiguration):
 
 
 def get_sampling_from_experiment(
-    npool: int,
-    ncores: int,
     nsamples: int,  # If project = True this is the order of the quadrature
     ninterp: int,
     experiment: ComsolConfiguration,

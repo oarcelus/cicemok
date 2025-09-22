@@ -1,6 +1,8 @@
 import multiprocessing
 from typing import Union
+import os
 
+import logging
 import matplotlib.pyplot as plt
 import pybamm
 import numpy as np
@@ -56,6 +58,15 @@ def set_soc(
     return parameter_values
 
 
+def set_input_parameters(
+    parameters: pybamm.ParameterValues, config: PybammConfiguration
+) -> pybamm.ParameterValues:
+    """Set model parameters."""
+    for key in config.names:
+        parameters[key] = "[input]"
+    return parameters
+
+
 def set_model_parameters(
     input: np.ndarray, config: PybammConfiguration
 ) -> dict[str, float]:
@@ -65,6 +76,28 @@ def set_model_parameters(
     return parameters
 
 
+def set_model_parameters_multithreading(
+    inputs: np.ndarray, config: PybammConfiguration
+) -> list[dict[str, float]]:
+    """Set model parameters."""
+    assert len(config.names) == len(inputs.T)
+    parameters: list[dict[str, float]] = [
+        {k: v for k, v in zip(config.names, input)} for input in inputs
+    ]
+    return parameters
+
+
+def run_pybamm_model_multithread(
+    parameters: list[dict[str, float]],
+    simulation: pybamm.Simulation,
+    config: PybammConfiguration,
+) -> np.ndarray | None:
+    solution = simulation.solve(inputs=parameters)
+    result: list = [solution[name].entries for name in config.expression]
+
+    return np.array(result).T
+
+
 def run_pybamm_model(
     input: np.ndarray, simulation: pybamm.Simulation, config: PybammConfiguration
 ) -> np.ndarray | None:
@@ -72,8 +105,13 @@ def run_pybamm_model(
     try:
         solution = simulation.solve(inputs=parameters)
         result: list = [solution[name].entries for name in config.expression]
+        res = np.array(result).T
 
-        return np.array(result)
+        x = np.linspace(res[0, 0], res[0, -1], 100)
+        y = np.interp(x, res[:, 0], res[:, 1])
+
+        reslast = np.column_stack((x, y))
+        return reslast
     except Exception:
         return None
 
@@ -83,16 +121,49 @@ def setup_pybamm_worker(config: PybammConfiguration, event: multiprocessing.Even
 
     model = load_model(config.modeltype)
     params = pybamm.ParameterValues(config.parameter_set)
-    model = set_soc(params, config)
+    params = set_soc(params, config)
+    params = set_input_parameters(params, config)
     experiment = pybamm.Experiment(config.experiment)
-    sim = pybamm.Simulation(model, experiment=experiment, parameter_values=params)
+
+    if config.solver_safety:
+        solver = pybamm.CasadiSolver(mode="safe")
+    else:
+        solver = pybamm.IDAKLUSolver()
+
+    sim = pybamm.Simulation(
+        model, solver=solver, experiment=experiment, parameter_values=params
+    )
     event.set()
+
+
+def setup_pybamm_multithreaded(config: PybammConfiguration) -> pybamm.Simulation:
+    model = load_model(config.modeltype)
+
+    params = pybamm.ParameterValues(config.parameter_set)
+    params = set_soc(params, config)
+    params = set_input_parameters(params, config)
+
+    solver = pybamm.IDAKLUSolver(options={"num_threads": config.ncores})
+    experiment = pybamm.Experiment(config.experiment)
+    sim = pybamm.Simulation(
+        model, solver=solver, experiment=experiment, parameter_values=params
+    )
+
+    return sim
 
 
 # def set_model_parameters_pool(input: np.ndarray, config: ComsolConfiguration):
 #     global model
 #
 #     model = set_model_parameters(input, model, config)
+
+
+def pybamm_samples_on_threads(samples: np.ndarray, config: PybammConfiguration):
+    sim = setup_pybamm_multithreaded(config)
+    parameters = set_model_parameters_multithreading(samples, config)
+    result = run_pybamm_model_multithread(parameters, sim, config)
+
+    return result
 
 
 def pybamm_worker_pool(sample: np.ndarray, config: PybammConfiguration):
