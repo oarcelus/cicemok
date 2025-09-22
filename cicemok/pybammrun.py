@@ -6,6 +6,7 @@ import logging
 import matplotlib.pyplot as plt
 import pybamm
 import numpy as np
+from scipy import interpolate
 
 from cicemok.configuration import PybammConfiguration
 
@@ -106,9 +107,12 @@ def run_pybamm_model(
         solution = simulation.solve(inputs=parameters)
         result: list = [solution[name].entries for name in config.expression]
         res = np.array(result).T
-
-        x = np.linspace(res[0, 0], res[0, -1], 100)
-        y = np.interp(x, res[:, 0], res[:, 1])
+        f = interpolate.interp1d(
+            res[:, 0], res[:, 1], assume_sorted=False, fill_value="extrapolate"
+        )
+        
+        x = config.xinterp
+        y = f(x)
 
         reslast = np.column_stack((x, y))
         return reslast

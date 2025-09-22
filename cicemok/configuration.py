@@ -46,6 +46,7 @@ class PybammConfiguration:
     expression: list[str]
     sto: list[float]
     experiment: list[str | tuple[str] | pybamm.experiment.step.BaseStep]
+    xinterp: np.ndarray # X-axis limits for interpolation
     ncores: int = 1
     isoc: float = 0.0
     modeltype: str = "DFN"

@@ -747,10 +747,8 @@ def get_analytical_sobol(fouriers, alphas, config: SensitivityConfiguration):
 
 def get_sampling_from_experiment(
     nsamples: int,  # If project = True this is the order of the quadrature
-    ninterp: int,
     experiment: ComsolConfiguration | PybammConfiguration,
     config: SensitivityConfiguration,
-    exclude: float,
     pool=None,
     method: str = "pce",
 ):
@@ -786,39 +784,18 @@ def get_sampling_from_experiment(
     else:
         evals = evaluate_models_threads(samples_q, experiment)
 
-    nevb = len(evals)
-
     # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
     check_nones = any(v is None for v in evals)
-    count_nones = sum(x is None for x in evals)
+    count_nones = sum(v is None for v in evals)
     logging.info(
         f"EVALUATIONS: Finished {len(evals)} evaluations, {count_nones} Nones -> {check_nones}"
     )
-    xinit = min([v[0, 0] for v in evals if v is not None and v[0, 0] > exclude])
-    xfin = max([v[-1, 0] for v in evals if v is not None])
 
-    f = [
-        (
-            interpolate.interp1d(
-                v[:, 0], v[:, 1], assume_sorted=False, fill_value="extrapolate"
-            )
-            if v is not None and v[0, 0] > exclude
-            else None
-        )
-        for v in evals
-    ]
-
-    x = np.linspace(xinit, xfin, ninterp)
-    ys = [interp(x) if interp is not None else None for interp in f]
-
-    evals = [np.column_stack((x, y)) if y is not None else None for y in ys]
-    neva = len(evals)
-
-    if method == "project" and (nevb != neva):
+    if method == "project" and check_nones:
         raise ValueError(
             "You are trying to the spectral projection for failed evaluations in quadrature points"
         )
-    if method == "salib" and (nevb != neva):
+    if method == "salib" and check_nones:
         raise ValueError(
             "You are trying to use method from SALib with a sobol sampler for failed evaluations"
         )
