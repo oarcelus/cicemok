@@ -1,5 +1,6 @@
 import multiprocessing
-from typing import Union
+from collections.abc import Iterable
+from typing import Union, Any
 import os
 
 import logging
@@ -49,14 +50,10 @@ def set_soc(
     cs100_p = csmax_p * solp100
 
     # Interpolate based on SOC
-    csinit_n = cs0_n + config.isoc * (cs100_n - cs0_n)
-    csinit_p = cs100_p + (1 - config.isoc) * (cs0_p - cs100_p)
+    csinit_n = cs0_n + config.conditions.isoc * (cs100_n - cs0_n)
+    csinit_p = cs100_p + (1 - config.conditions.isoc) * (cs0_p - cs100_p)
 
-    # Set initial concentrations
-    parameter_values["Initial concentration in negative electrode [mol.m-3]"] = csinit_n
-    parameter_values["Initial concentration in positive electrode [mol.m-3]"] = csinit_p
-
-    return parameter_values
+    return csinit_n, csinit_p
 
 
 def set_input_parameters(
@@ -65,112 +62,98 @@ def set_input_parameters(
     """Set model parameters."""
     for key in config.names:
         parameters[key] = "[input]"
+
+    parameters["Initial concentration in negative electrode [mol.m-3]"] = "[input]"
+    parameters["Initial concentration in positive electrode [mol.m-3]"] = "[input]"
+
+    if config.experiment is None:
+        parameters["Current function [A]"] = "[input]"
+
     return parameters
 
 
 def set_model_parameters(
-    input: np.ndarray, config: PybammConfiguration
+    input: Iterable[Any], simulation: pybamm.Simulation, config: PybammConfiguration
 ) -> dict[str, float]:
     """Set model parameters."""
     assert len(config.names) == len(input)
-    parameters: dict[str, float] = {k: v for k, v in zip(config.names, input.tolist())}
+
+    if isinstance(input, np.ndarray):
+        input = input.tolist()
+
+    # Parameters to analyze
+    parameters: dict[str, float] = {k: v for k, v in zip(config.names, input)}
+
+    # Conditions
+    aux_parameters = simulation.parameter_values
+    csinit_n, csinit_p = set_soc(aux_parameters, config)
+
+    parameters["Initial concentration in negative electrode [mol.m-3]"] = csinit_n
+    parameters["Initial concentration in positive electrode [mol.m-3]"] = csinit_p
+
+    if config.experiment is None:
+        if isinstance(config.conditions.experiment, np.ndarray):
+            # Space for drive-cycles or interpolates
+            pass
+
+        parameters["Current function [A]"] = config.conditions.experiment
+
     return parameters
-
-
-def set_model_parameters_multithreading(
-    inputs: np.ndarray, config: PybammConfiguration
-) -> list[dict[str, float]]:
-    """Set model parameters."""
-    assert len(config.names) == len(inputs.T)
-    parameters: list[dict[str, float]] = [
-        {k: v for k, v in zip(config.names, input)} for input in inputs
-    ]
-    return parameters
-
-
-def run_pybamm_model_multithread(
-    parameters: list[dict[str, float]],
-    simulation: pybamm.Simulation,
-    config: PybammConfiguration,
-) -> np.ndarray | None:
-    solution = simulation.solve(inputs=parameters)
-    result: list = [solution[name].entries for name in config.expression]
-
-    return np.array(result).T
 
 
 def run_pybamm_model(
     input: np.ndarray, simulation: pybamm.Simulation, config: PybammConfiguration
 ) -> np.ndarray | None:
-    parameters = set_model_parameters(input, config)
+    parameters = set_model_parameters(input, simulation, config)
     try:
-        solution = simulation.solve(inputs=parameters)
+        if config.experiment is None:
+            solution = simulation.solve(config.conditions.texp, inputs=parameters)
+        else:
+            solution = simulation.solve(inputs=parameters)
+
         result: list = [solution[name].entries for name in config.expression]
         res = np.array(result).T
         f = interpolate.interp1d(
             res[:, 0], res[:, 1], assume_sorted=False, fill_value="extrapolate"
         )
-        
+
         x = config.xinterp
         y = f(x)
 
-        reslast = np.column_stack((x, y))
-        return reslast
+        res = np.column_stack((x, y))
+
+        return res
     except Exception:
         return None
 
 
-def setup_pybamm_worker(config: PybammConfiguration, event: multiprocessing.Event):
-    global sim
-
+def setup(config: PybammConfiguration):
     model = load_model(config.modeltype)
     params = pybamm.ParameterValues(config.parameter_set)
-    params = set_soc(params, config)
-    params = set_input_parameters(params, config)
-    experiment = pybamm.Experiment(config.experiment)
 
+    params = set_input_parameters(params, config)
     if config.solver_safety:
         solver = pybamm.CasadiSolver(mode="safe")
     else:
         solver = pybamm.IDAKLUSolver()
 
-    sim = pybamm.Simulation(
-        model, solver=solver, experiment=experiment, parameter_values=params
-    )
-    event.set()
-
-
-def setup_pybamm_multithreaded(config: PybammConfiguration) -> pybamm.Simulation:
-    model = load_model(config.modeltype)
-
-    params = pybamm.ParameterValues(config.parameter_set)
-    params = set_soc(params, config)
-    params = set_input_parameters(params, config)
-
-    solver = pybamm.IDAKLUSolver(options={"num_threads": config.ncores})
-    experiment = pybamm.Experiment(config.experiment)
-    sim = pybamm.Simulation(
-        model, solver=solver, experiment=experiment, parameter_values=params
-    )
+    if config.experiment is not None:
+        sim = pybamm.Simulation(
+            model, solver=solver, experiment=config.experiment, parameter_values=params
+        )
+    else:
+        sim = pybamm.Simulation(model, solver=solver, parameter_values=params)
 
     return sim
 
 
-# def set_model_parameters_pool(input: np.ndarray, config: ComsolConfiguration):
-#     global model
-#
-#     model = set_model_parameters(input, model, config)
+def setup_pybamm_worker(config: PybammConfiguration, event: multiprocessing.Event):
+    global sim
+    sim = setup(config)
+    event.set()
 
 
-def pybamm_samples_on_threads(samples: np.ndarray, config: PybammConfiguration):
-    sim = setup_pybamm_multithreaded(config)
-    parameters = set_model_parameters_multithreading(samples, config)
-    result = run_pybamm_model_multithread(parameters, sim, config)
-
-    return result
-
-
-def pybamm_worker_pool(sample: np.ndarray, config: PybammConfiguration):
+def pybamm_worker_pool(sample: Iterable[Any], config: PybammConfiguration):
     global sim
 
     result = run_pybamm_model(sample, sim, config)

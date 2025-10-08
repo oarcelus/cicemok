@@ -6,6 +6,7 @@ mph
 numpy==1.26.4
 setuptools
 pymatgen
+pymoo
 Py-BOBYQA
 SALib
 multiprocess

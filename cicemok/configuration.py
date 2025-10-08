@@ -11,14 +11,14 @@ from pybamm.experiment.step import BaseStep
 
 @dataclasses.dataclass
 class CurrentConfigurations:
+    experiment: np.ndarray | float
+    texp: list[float] | np.ndarray
     isoc: float = 0.0
-    texp: float = 0.0
-    experiment: np.ndarray | None = None
 
 
 @dataclasses.dataclass
 class ExperimentConfiguration(CurrentConfigurations):
-    rmax: float = 0.0 
+    rmax: float = 0.0
     dt: float = 0.0
     minsoc: float = 0.0
     maxsoc: float = 0.0
@@ -36,7 +36,7 @@ class ComsolConfiguration:
     unit: list[str]
     database: str
     evname: str
-    isocname: str 
+    isocname: str
     experiment: CurrentConfigurations | None = None
 
 
@@ -45,10 +45,12 @@ class PybammConfiguration:
     names: list[str]
     expression: list[str]
     sto: list[float]
-    experiment: list[str | tuple[str] | pybamm.experiment.step.BaseStep]
-    xinterp: np.ndarray # X-axis limits for interpolation
+    conditions: (
+        CurrentConfigurations | None  # Current configurations for specific names_conditions
+    )
+    experiment: pybamm.Experiment | None
+    xinterp: np.ndarray | None  # X-axis limits for interpolation
     ncores: int = 1
-    isoc: float = 0.0
     modeltype: str = "DFN"
     solver_safety: bool = False
     parameter_set: str = "Chen2020"
@@ -69,4 +71,3 @@ class SensitivityConfiguration:
     early_stop: bool = False
     idtargets: list = field(default_factory=list)
     precomputed_poly: dict = field(default_factory=dict)
-    

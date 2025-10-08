@@ -15,6 +15,7 @@ from SALib.analyze import sobol as analyzer
 from SALib.sample import sobol as sampler
 from scipy import interpolate
 from sklearn.linear_model import Lars, OrthogonalMatchingPursuit
+from sklearn.neighbors import KNeighborsRegressor
 
 import UQpy.surrogates as surrogates
 import UQpy.sampling as sampling
@@ -51,74 +52,66 @@ def generate_expansion_from_alpha(
     return polynomials
 
 
+# def curate_none_evaluations(
+#     evaluations: list[np.ndarray | None], samples: np.ndarray
+# ) -> tuple[np.ndarray, list[np.ndarray]]:
+#     idxs = [i for i, val in enumerate(evaluations) if val is None]
+#
+#     if len(idxs) == len(evaluations):
+#         raise ValueError("All samples failed.")
+#
+#     if float(len(idxs)) / len(evaluations) > 0.2:
+#         raise ValueError("More than 20% of runs failed.")
+#
+#     count = 0
+#     while idxs:
+#         closeidx = [
+#             np.argsort(np.linalg.norm(samples - samples[idx], axis=1))[1 + count]
+#             for idx in idxs
+#         ]
+#
+#         for i, idx in enumerate(idxs):
+#             evaluations[idx] = evaluations[closeidx[i]]
+#
+#         idxs = [i for i, val in enumerate(evaluations) if val is None]
+#         count += 1
+#
+#     assert all(isinstance(result, np.ndarray) for result in evaluations)
+#     curated_evaluations: list[np.ndarray] = evaluations  # type: ignore
+#     times = curated_evaluations[0][:, 0]
+#     evals = [result[:, 1] for result in curated_evaluations]
+#
+#     return times, evals
+
+
 def curate_none_evaluations(
-    evaluations: list[np.ndarray | None], samples: np.ndarray
+    evaluations: list[np.ndarray | None],
+    samples: np.ndarray,
+    max_fails: float = 0.02,
+    k: int = 3,
+    eps: float = 1e-12,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
-    idxs = [i for i, val in enumerate(evaluations) if val is None]
+    idx_ok = [i for i, v in enumerate(evaluations) if v is not None]
+    idx_fail = [i for i, v in enumerate(evaluations) if v is None]
 
-    if len(idxs) == len(evaluations):
-        raise ValueError("All samples failed.")
+    if len(idx_fail) / len(evaluations) > max_fails:
+        raise ValueError("More than 2% of runs failed.")
 
-    if float(len(idxs)) / len(evaluations) > 0.2:
-        raise ValueError("More than 20% of runs failed.")
+    common_axis = evaluations[idx_ok[0]][:, 0]
 
-    count = 0
-    while idxs:
-        closeidx = [
-            np.argsort(np.linalg.norm(samples - samples[idx], axis=1))[1 + count]
-            for idx in idxs
-        ]
+    Y = np.array([evaluations[i][:, 1] for i in idx_ok])
+    X = samples[idx_ok]
 
-        for i, idx in enumerate(idxs):
-            evaluations[idx] = evaluations[closeidx[i]]
+    knn = KNeighborsRegressor(n_neighbors=k, weights="distance")
+    knn.fit(X, Y)
 
-        idxs = [i for i, val in enumerate(evaluations) if val is None]
-        count += 1
+    for i in idx_fail:
+        yi = knn.predict(samples[i].reshape(1, -1))[0]
+        evaluations[i] = np.column_stack((common_axis, yi))
 
     assert all(isinstance(result, np.ndarray) for result in evaluations)
-    curated_evaluations: list[np.ndarray] = evaluations  # type: ignore
-    times = curated_evaluations[0][:, 0]
-    evals = [result[:, 1] for result in curated_evaluations]
 
-    return times, evals
-
-
-def curate_cutoff_evaluations(
-    evaluations: list[np.ndarray], samples: np.ndarray
-) -> list[np.ndarray]:
-    maxim = max([val.shape[0] for val in evaluations])
-    coincidence = [i for i, val in enumerate(evaluations) if val.shape[0] == maxim]
-    idxs = [i for i, val in enumerate(evaluations) if val.shape[0] < maxim]
-
-    if len(coincidence) < 2:
-        raise ValueError("All samples reached cutoff ahead of time.")
-
-    if float(len(idxs)) / len(evaluations) > 0.2:
-        raise ValueError("More than 20% of runs failed.")
-
-    count = 0
-    while idxs:
-        closeidx = [
-            np.argsort(np.linalg.norm(samples - samples[idx], axis=1))[1 + count]
-            for idx in idxs
-        ]
-
-        for i, idx in enumerate(idxs):
-            evaluations[idx] = evaluations[closeidx[i]]
-
-        idxs = [i for i, val in enumerate(evaluations) if len(val) < maxim]
-        count += 1
-
-    assert all(isinstance(result, np.ndarray) for result in evaluations)
-    assert all(len(val) == maxim for val in evaluations)
-
-    return evaluations
-
-
-def evaluate_models_threads(samples: np.ndarray, config: PybammConfiguration):
-    results = pybammrun.pybamm_samples_on_threads(samples, config)
-
-    return results
+    return common_axis, [result[:, 1] for result in evaluations]
 
 
 def _indexed_worker(args: tuple[int, np.ndarray, PybammConfiguration]):
@@ -749,7 +742,7 @@ def get_sampling_from_experiment(
     nsamples: int,  # If project = True this is the order of the quadrature
     experiment: ComsolConfiguration | PybammConfiguration,
     config: SensitivityConfiguration,
-    pool=None,
+    pool,
     method: str = "pce",
 ):
     if method == "salib":
@@ -760,14 +753,18 @@ def get_sampling_from_experiment(
 
         sp = {
             "names": experiment.names,
-            "bounds": [[-1.0, 1.0]] * len(config.distribution.marginals),
+            "bounds": [[0.0, 1.0]] * len(config.distribution.marginals),
             "num_vars": len(experiment.names),
         }
 
         samples_r = sampler.sample(sp, nsamples, calc_second_order=config.sobol_second)
-        nat = Nataf(config.distribution, samples_z=samples_r)
 
-        samples_q = nat.samples_x
+        samples_q = np.column_stack(
+            [
+                config.distribution.marginals[i].icdf(samples_r[:, i])
+                for i in range(len(config.distribution.marginals))
+            ]
+        )
         problem = sp
 
     else:
@@ -779,10 +776,7 @@ def get_sampling_from_experiment(
         )
         problem = None
 
-    if pool is not None:
-        evals = evaluate_models_pool(pool, samples_q.T, experiment)
-    else:
-        evals = evaluate_models_threads(samples_q, experiment)
+    evals = evaluate_models_pool(pool, samples_q.T, experiment)
 
     # INVERT MIN MAX FUNCTION FOR INCREASING VOLTAGE VALUES (CHARGE)
     check_nones = any(v is None for v in evals)
@@ -795,10 +789,10 @@ def get_sampling_from_experiment(
         raise ValueError(
             "You are trying to the spectral projection for failed evaluations in quadrature points"
         )
-    if method == "salib" and check_nones:
-        raise ValueError(
-            "You are trying to use method from SALib with a sobol sampler for failed evaluations"
-        )
+    # if method == "salib" and check_nones:
+    #     raise ValueError(
+    #         "You are trying to use method from SALib with a sobol sampler for failed evaluations"
+    #     )
 
     x, ys = curate_none_evaluations(evals, samples_r)
 
@@ -852,10 +846,14 @@ def get_sa_from_experiment(
 
     if method == "salib":
         return sobol
-    elif all(pol is not None for pol in polyno) and all(
-        fou is not None for fou in fourier
-    ):
+    elif method == "pce":
         sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, config)
         return fourier, polyno, alpha, sobol, sobol_2, sobol_t
     else:
-        return fourier, polyno, alpha, None, None, None
+        if all(pol is not None for pol in polyno) and all(
+            fou is not None for fou in fourier
+        ):
+            sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, config)
+            return fourier, polyno, alpha, sobol, sobol_2, sobol_t
+        else:
+            return fourier, polyno, alpha, None, None, None

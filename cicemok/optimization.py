@@ -7,24 +7,149 @@ import pickle
 from functools import partial
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import mph
+import pybamm
 import numpy as np
 import pybobyqa
+from scipy import interpolate
+from scipy.stats import norm
 from pymoo.algorithms.soo.nonconvex.pso import PSO
+from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.problem import Problem
 from pymoo.core.callback import Callback
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
+from UQpy.distributions import JointIndependent
+from UQpy.transformations import Nataf
 
-from cicemok import comsol, sensitivity
+from cicemok import comsol, pybammrun, sensitivity
 from cicemok.configuration import (
     ComsolConfiguration,
+    PybammConfiguration,
     CurrentConfigurations,
     ExperimentConfiguration,
 )
 
 _history = []
+
+
+class PybammmCallback(Callback):
+    def __init__(self) -> None:
+        super().__init__()
+        self.xhist = []
+        self.fhist = []
+
+    def notify(self, algorithm):
+        x = algorithm.pop.get("X")
+        f = algorithm.pop.get("F")
+
+        idf = np.argmin(f)
+
+        self.xhist.append(x[idf, :])
+        self.fhist.append(f[idf])
+
+        logging.info(
+            f"PYMOO: Generation {algorithm.n_gen} -> X: {x[idf, :]} -> F: {f[idf]}"
+        )
+
+
+class PybammProblem(Problem):
+    def __init__(
+        self,
+        experiments: list[np.ndarray],
+        configs: list[PybammConfiguration],
+        dist: JointIndependent,
+        model: pybamm.Simulation | None = None,
+        pool=None,
+        n_var=-1,
+        n_obj=1,
+        n_ieq_constr=0,
+        n_eq_constr=0,
+        xl=None,
+        xu=None,
+    ):
+        super().__init__(
+            n_var=n_var,
+            n_obj=n_obj,
+            n_ieq_constr=n_ieq_constr,
+            n_eq_constr=n_eq_constr,
+            xl=xl,
+            xu=xu,
+        )
+
+        if pool is None:
+            self._pool = None
+        else:
+            self._pool = pool
+
+        self._experiments = experiments
+        self._configs = configs
+        self._model = model
+        self._n_obj = n_obj
+        self._dist = dist
+
+    def _evaluate(
+        self,
+        x,
+        out,
+        *args,
+        **kwargs,
+    ):
+        objectives = []
+
+        z = x.copy()
+
+        # Inverse rosenblatt for independent mutlivariate distribution of standard uniform samples U[0, 1]
+        x = np.column_stack(
+            [
+                self._dist.marginals[i].icdf(z[:, i])
+                for i in range(len(self._dist.marginals))
+            ]
+        )
+
+        for idx, (experiment, config) in enumerate(
+            zip(self._experiments, self._configs)
+        ):
+            if self._pool is None:
+                assert self._model is not None
+                results = [
+                    pybammrun.run_pybamm_model(sample, self._model, config)
+                    for sample in x
+                ]
+            else:
+                func = partial(pybammrun.pybamm_worker_pool, config=config)
+                results = self._pool.map(func, x)
+
+            try:
+                common_axis, evaluations = sensitivity.curate_none_evaluations(
+                    results, x
+                )
+                f = interpolate.interp1d(
+                    experiment[:, 0],
+                    experiment[:, 1],
+                    assume_sorted=False,
+                    fill_value="extrapolate",
+                )
+
+                experiment = f(common_axis)
+
+                lstsq = [
+                    np.mean((evaluation - experiment) ** 2.0)
+                    for evaluation in evaluations
+                ]  # type: ignore
+                objectives.append(lstsq)
+
+            except ValueError as error:
+                logging.error(f"{error}")
+                raise ValueError(
+                    "FATAL ERROR: We cannot continue too many evaluations failed in the given iteration"
+                )
+
+        objectives = np.column_stack(objectives)
+        if self._n_obj > 1:
+            out["F"] = objectives
+        else:
+            out["F"] = np.mean(objectives, axis=1)
 
 
 class ComsolCallback(Callback):
@@ -258,7 +383,118 @@ def check_noe(sobol: np.ndarray, estimated: list = []) -> int | None:
         return None
 
 
-def optimize_parameters_multi_obj(
+def optimize_parameters_multi_obj_pybamm(
+    npool: int,
+    n_gen: int,
+    pop_size: int,
+    multi_obj: bool,
+    loads: list[np.ndarray | float],
+    experiments: list[np.ndarray],
+    isocs: list[float],
+    texps: list[float],
+    dist: JointIndependent,
+    names: list[str],
+    expression: list[str],
+    sto: list[float],
+    modeltype: str,
+    xinterp: np.ndarray,
+    ncores: int = 1,
+    solver_safety: bool = False,
+    parameter_set: str = "Chen2020",
+):
+    assert all(len(var) == len(loads) for var in [loads, experiments, isocs, texps])
+    assert len(dist.marginals) == len(names)
+
+    pybamm_cfg = PybammConfiguration(
+        names=names,
+        expression=expression,
+        sto=sto,
+        modeltype=modeltype,
+        conditions=None,
+        experiment=None,
+        xinterp=xinterp,
+        ncores=ncores,
+        solver_safety=solver_safety,
+        parameter_set=parameter_set,
+    )
+
+    if npool > 1:
+        ctx = multiprocessing.get_context("spawn")
+        # Start Computing Processes for COMSOL
+        init_event = ctx.Event()
+        pool = ctx.Pool(
+            processes=npool,
+            initializer=pybammrun.setup_pybamm_worker,
+            initargs=(pybamm_cfg, init_event),
+            maxtasksperchild=100,
+        )
+        init_event.wait()
+    else:
+        simulation = pybammrun.setup(pybamm_cfg)
+
+    cfgs = []
+    for load, texp, isoc in zip(loads, texps, isocs):
+        current_cfg = CurrentConfigurations(isoc=isoc, texp=[0, texp], experiment=load)
+        tmp_cfg = dataclasses.replace(pybamm_cfg)
+        tmp_cfg.conditions = current_cfg
+        cfgs.append(tmp_cfg)
+
+    if multi_obj:
+        n_obj = len(experiments)
+    else:
+        n_obj = 1
+
+    if npool > 1:
+        problem = PybammProblem(
+            experiments,
+            cfgs,
+            dist,
+            None,
+            pool,  # type: ignore
+            n_var=len(names),
+            n_obj=n_obj,
+            xl=[0.0] * len(names),
+            xu=[0.999] * len(names),
+        )
+    else:
+        problem = PybammProblem(
+            experiments,
+            cfgs,
+            dist,
+            simulation,
+            None,
+            n_var=len(names),
+            n_obj=n_obj,
+            xl=[0.0] * len(names),
+            xu=[0.999] * len(names),
+        )
+
+    termination = get_termination("n_gen", n_gen)
+    callback = PybammmCallback()
+    algorithm = NSGA2(pop_size=pop_size) if n_obj > 1 else PSO(pop_size=pop_size)
+    soln = minimize(
+        problem,
+        algorithm,
+        termination,
+        seed=1,
+        callback=callback,
+        verbose=False,
+    )
+
+    z = soln.X
+    z = np.array(z).flatten()
+    # Inverse rosenblatt for independent mutlivariate distribution of standard uniform samples U[0, 1]
+    x = [dist.marginals[i].icdf(z[i]) for i in range(len(dist.marginals))]
+
+    if len(names) != len(x):
+        raise ValueError(f"Length mismatch: {len(names)} names vs {len(x)} values.")
+
+    with open("optimized_parameters.txt", "w", encoding="utf-8") as f:
+        for name, val in zip(names, x):
+            f.write(f"{name} {np.asarray(val).item():.8e}\n")
+
+
+def optimize_parameters_multi_obj_comsol(
     npool: int,
     ncores: int,
     n_gen: int,
@@ -365,6 +601,7 @@ def optimize_parameters_multi_obj(
     else:
         model = comsol.set_model_parameters(x, model, comsol_cfg)  # type: ignore
         model.save("./test.mph")
+
 
 def optimize_parameters_ode(
     ncores: int,
@@ -570,5 +807,3 @@ def optimize_parameters_ode(
         logging.info(
             f"ESTIMATED: Parameters {' '.join([str(est) for est in estimated])} -> Last Parameter {name} -> X: {x} F: {f}"
         )
-
-
