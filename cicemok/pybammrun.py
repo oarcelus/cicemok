@@ -6,20 +6,30 @@ import os
 import logging
 import matplotlib.pyplot as plt
 import pybamm
+import pybammeis
 import numpy as np
 from scipy import interpolate
 
-from cicemok.configuration import PybammConfiguration
+from cicemok.configuration import PybammConfiguration, ExperimentType
 
 
-def load_model(model_name: str = "DFN") -> pybamm.BaseModel:
+def load_model(config: PybammConfiguration) -> pybamm.BaseModel:
     """Load a PyBaMM model. Defaults to DFN."""
-    model_map = {
-        "DFN": pybamm.lithium_ion.DFN(),
-        "SPM": pybamm.lithium_ion.SPM(),
-        "SPMe": pybamm.lithium_ion.SPMe(),
-    }
-    return model_map.get(model_name, pybamm.lithium_ion.DFN())
+
+    if config.options is None:
+        model_map = {
+            "DFN": pybamm.lithium_ion.DFN(),
+            "SPM": pybamm.lithium_ion.SPM(),
+            "SPMe": pybamm.lithium_ion.SPMe(),
+        }
+    else:
+        model_map = {
+            "DFN": pybamm.lithium_ion.DFN(config.options),
+            "SPM": pybamm.lithium_ion.SPM(config.options),
+            "SPMe": pybamm.lithium_ion.SPMe(config.options),
+        }
+
+    return model_map.get(config.modeltype, pybamm.lithium_ion.DFN())
 
 
 def set_soc(
@@ -65,9 +75,29 @@ def set_input_parameters(
 
     parameters["Initial concentration in negative electrode [mol.m-3]"] = "[input]"
     parameters["Initial concentration in positive electrode [mol.m-3]"] = "[input]"
+    parameters["Lower voltage cut-off [V]"] = "[input]"
+    parameters["Upper voltage cut-off [V]"] = "[input]"
 
-    if config.experiment is None:
-        parameters["Current function [A]"] = "[input]"
+    if config.conditions.temp is not None and config.conditions.init_temp is not None:
+        parameters["Ambient temperature [K]"] = "[input]"
+        parameters["Initial temperature [K]"] = "[input]"
+
+    if config.conditions.experiment == ExperimentType.EXPERIMENT:
+        return parameters
+    elif config.conditions.experiment == ExperimentType.EIS:
+        return parameters
+    elif config.conditions.experiment == ExperimentType.PROFILE:
+        assert isinstance(config.conditions.current, pybamm.Interpolant)
+        parameters["Current function [A]"] = config.conditions.current
+        return parameters
+    elif config.conditions.experiment == ExperimentType.CC:
+        assert isinstance(config.conditions.current, float)
+        parameters["Current function [A]"] = (
+            "[input]"  # Only condition for now which can loop over currents at solve time
+        )
+        return parameters
+    else:
+        raise ValueError("ExperimentType enum value not specified")
 
     return parameters
 
@@ -90,13 +120,15 @@ def set_model_parameters(
 
     parameters["Initial concentration in negative electrode [mol.m-3]"] = csinit_n
     parameters["Initial concentration in positive electrode [mol.m-3]"] = csinit_p
+    parameters["Lower voltage cut-off [V]"] = config.conditions.cutoff[0]
+    parameters["Upper voltage cut-off [V]"] = config.conditions.cutoff[1]
 
-    if config.experiment is None:
-        if isinstance(config.conditions.experiment, np.ndarray):
-            # Space for drive-cycles or interpolates
-            pass
+    if config.conditions.temp is not None and config.conditions.init_temp is not None:
+        parameters["Ambient temperature [K]"] = config.conditions.temp
+        parameters["Initial temperature [K]"] = config.conditions.init_temp
 
-        parameters["Current function [A]"] = config.conditions.experiment
+    if config.conditions.experiment == ExperimentType.CC:
+        parameters["Current function [A]"] = config.experiment.current
 
     return parameters
 
@@ -106,41 +138,55 @@ def run_pybamm_model(
 ) -> np.ndarray | None:
     parameters = set_model_parameters(input, simulation, config)
     try:
-        if config.experiment is None:
+        if config.conditions.experiment in (ExperimentType.CC, ExperimentType.EIS):
             solution = simulation.solve(config.conditions.texp, inputs=parameters)
         else:
             solution = simulation.solve(inputs=parameters)
 
-        result: list = [solution[name].entries for name in config.expression]
+        if config.conditions.experiment == ExperimentType.EIS:
+            result: list = [
+                config.conditions.texp,
+                solution.real,
+                solution.imag,
+            ]
+        else:
+            result: list = [solution[name].entries for name in config.expression]
+
         res = np.array(result).T
         f = interpolate.interp1d(
-            res[:, 0], res[:, 1], assume_sorted=False, fill_value="extrapolate"
+            res[:, 0], res[:, 1:], assume_sorted=False, axis=0, fill_value="extrapolate"
         )
 
         x = config.xinterp
         y = f(x)
 
         res = np.column_stack((x, y))
-
         return res
-    except Exception:
+    except Exception as e:
+        print(e)
         return None
 
 
 def setup(config: PybammConfiguration):
-    model = load_model(config.modeltype)
+    model = load_model(config)
     params = pybamm.ParameterValues(config.parameter_set)
-
     params = set_input_parameters(params, config)
+
     if config.solver_safety:
         solver = pybamm.CasadiSolver(mode="safe")
     else:
         solver = pybamm.IDAKLUSolver()
 
-    if config.experiment is not None:
+    if config.conditions.experiment == ExperimentType.EXPERIMENT:
+        assert isinstance(config.conditions.current, pybamm.Experiment)
         sim = pybamm.Simulation(
-            model, solver=solver, experiment=config.experiment, parameter_values=params
+            model,
+            solver=solver,
+            experiment=config.conditions.current,
+            parameter_values=params,
         )
+    elif config.conditions.experiment == ExperimentType.EIS:
+        sim = pybammeis.EISSimulation(model, parameter_values=params)
     else:
         sim = pybamm.Simulation(model, solver=solver, parameter_values=params)
 

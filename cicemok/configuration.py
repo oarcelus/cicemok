@@ -5,15 +5,31 @@ import chaospy as cp
 import UQpy as uq
 from typing import Union
 import pybamm
+from enum import Enum
 
-from pybamm.experiment.step import BaseStep
+class ExperimentType(Enum):
+    EXPERIMENT = 1
+    CC = 2
+    PROFILE = 3
+    EIS = 4
+
+
+@dataclasses.dataclass
+class PybammExperimentalConfigurations:
+    current: pybamm.Experiment | pybamm.Interpolant | float | None
+    texp: list[float] | np.ndarray
+    isoc: float = 0.0
+    temp: float | None = None
+    init_temp: float | None = None
+    cutoff: tuple[float, float] = (1.5, 4.0)
+    experiment: ExperimentType = ExperimentType.CC
 
 
 @dataclasses.dataclass
 class CurrentConfigurations:
-    experiment: np.ndarray | float
-    texp: list[float] | np.ndarray
     isoc: float = 0.0
+    texp: float = 0.0
+    experiment: np.ndarray | None = None
 
 
 @dataclasses.dataclass
@@ -45,11 +61,9 @@ class PybammConfiguration:
     names: list[str]
     expression: list[str]
     sto: list[float]
-    conditions: (
-        CurrentConfigurations | None  # Current configurations for specific names_conditions
-    )
-    experiment: pybamm.Experiment | None
+    conditions: PybammExperimentalConfigurations
     xinterp: np.ndarray | None  # X-axis limits for interpolation
+    options: dict | None = None
     ncores: int = 1
     modeltype: str = "DFN"
     solver_safety: bool = False

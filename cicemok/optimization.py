@@ -26,7 +26,7 @@ from cicemok import comsol, pybammrun, sensitivity
 from cicemok.configuration import (
     ComsolConfiguration,
     PybammConfiguration,
-    CurrentConfigurations,
+    PybammExperimentalConfigurations,
     ExperimentConfiguration,
 )
 
@@ -434,7 +434,9 @@ def optimize_parameters_multi_obj_pybamm(
 
     cfgs = []
     for load, texp, isoc in zip(loads, texps, isocs):
-        current_cfg = CurrentConfigurations(isoc=isoc, texp=[0, texp], experiment=load)
+        current_cfg = PybammExperimentalConfigurations(
+            texp=[0, texp], isoc=isoc, experiment=None, current=load
+        )
         tmp_cfg = dataclasses.replace(pybamm_cfg)
         tmp_cfg.conditions = current_cfg
         cfgs.append(tmp_cfg)

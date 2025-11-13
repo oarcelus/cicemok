@@ -97,9 +97,11 @@ def curate_none_evaluations(
     if len(idx_fail) / len(evaluations) > max_fails:
         raise ValueError("More than 2% of runs failed.")
 
-    common_axis = evaluations[idx_ok[0]][:, 0]
+    valid_eval = evaluations[idx_ok[0]]
+    common_axis = valid_eval[:, 0]
+    N, M = valid_eval.shape
 
-    Y = np.array([evaluations[i][:, 1] for i in idx_ok])
+    Y = np.array([evaluations[i][:, 1].flatten() for i in idx_ok])
     X = samples[idx_ok]
 
     knn = KNeighborsRegressor(n_neighbors=k, weights="distance")
@@ -107,11 +109,12 @@ def curate_none_evaluations(
 
     for i in idx_fail:
         yi = knn.predict(samples[i].reshape(1, -1))[0]
+        yi = yi.reshape(N, M - 1)
         evaluations[i] = np.column_stack((common_axis, yi))
 
     assert all(isinstance(result, np.ndarray) for result in evaluations)
 
-    return common_axis, [result[:, 1] for result in evaluations]
+    return common_axis, [result[:, 1:] for result in evaluations]
 
 
 def _indexed_worker(args: tuple[int, np.ndarray, PybammConfiguration]):
@@ -143,7 +146,6 @@ def evaluate_models_pool(
 
 def pce(samples, evals: list[np.ndarray], config: SensitivityConfiguration):
     polyno = generate_polynomials(config)
-
     X = polyno.evaluate_basis(samples)
     y = np.asarray(evals)
     uhat = np.linalg.lstsq(X, y, rcond=None)[0]
@@ -206,6 +208,31 @@ def precompute_polynomial_bases(
     logging.info("Completed precomputation of polynomial bases.")
 
     return precomputed
+
+
+def generate_fn_basis(alpha, config: SensitivityConfiguration):
+    fn_config = copy.deepcopy(config)
+    fn_config.cross_truncation = 1.0
+    d = len(config.distribution.marginals)
+
+    II = np.eye(d, d, dtype=int)
+
+    # Calculate all possible forward neighboughrs
+    I_NEW = II[np.newaxis, :, :]
+    FWD = (I_NEW + alpha.T[:, np.newaxis, :]).reshape(d * alpha.shape[1], d)
+
+    # Get all unique elements that are not already in alpha
+    FWD = np.unique(FWD, axis=0)
+    mask = ~np.any(np.all(FWD[:, np.newaxis] == alpha.T, axis=2), axis=1)
+    FWD_UQ = FWD[mask]
+
+    BWD = FWD_UQ[:, np.newaxis, :] - I_NEW
+
+    comparison = BWD[:, :, np.newaxis, :] == alpha.T[np.newaxis, :, :]
+    contained = np.any(np.all(comparison, axis=-1), axis=-1)
+    idx = np.where(np.all(contained, axis=1))[0]
+
+    return FWD_UQ[idx].T
 
 
 def pq_loo_cv(
@@ -285,60 +312,104 @@ def fn_loo_cv(
     samples, evals: list[np.ndarray], config: SensitivityConfiguration, method: Callable
 ):
     """
-    This algorithm uses sparse signal regression (LARS, OMP, SP, SISSO) with Leave-One-Out Error CV.
-    It uses Forward Neighbors for the best model selection, also minimizing the Leave-One-Out Error
-    We follow J. Jakeman's paper 2015
+    Run sparse signal regression with Leave-One-Out Error CV across multiple targets,
+    using a basis adaptation with the forward neighbors method.
 
-    samples: Experimental design. (nsamples, nfeatures)
-    evals: Model evaluations. (nsamples, ntargets)
-    config: SensitivityConfiguration class
+    Parameters
+    ----------
+    samples : np.ndarray
+        The experimental design (nsamples, nfeatures).
+    evals : list[np.ndarray]
+        Model evaluations (nsamples, ntargets).
+    config : SensitivityConfiguration
+        Configuration for generating the polynomial bases.
+    method : Callable
+        A regression method that takes (poly_evals, target_data) as inputs and returns
+        (cveloo, uhat), where cveloo is the Leave-One-Out error and uhat is the regression
+        coefficients or model output.
+
+    Returns
+    -------
+    tuple
+        Two lists: the first contains the selected polynomial objects for each target,
+        and the second contains the corresponding regression results (e.g., coefficients).
     """
-
+    # Standardize evaluations and extract dimensions
     evaluations = np.asarray(evals)
+    n, ntrgt = evaluations.shape
+    logging.info(f"REGRESSION: nsamples {n} ntargets: {ntrgt}")
 
-    # Problem dimensions
-    n = evaluations.shape[0]
-    ntrgt = evaluations.shape[1]
+    # Precompute the polynomial bases
+    logging.info(
+        f"Precomputing polynomial basis for order p={config.order} and cross_truncation q={config.cross_truncation:.3f}..."
+    )
 
-    # Initialize basis to have q=1 and a cardinality closest to 10*n
-    alpha, polynomial = generate_fn_basis(None, 10 * n, config)
-    poly_evals = polynomial(*samples).T
+    polynomial = generate_polynomials(config)
+    alpha_0 = polynomial.multi_index_set.T
+    poly_evals_0 = polynomial.evaluate_basis(samples)
 
-    # Loop over targets
-    eloos = [np.inf] * ntrgt
-    polynomials = [polynomial] * ntrgt
-    fouriers = [0] * ntrgt
-    surrogates = [0] * ntrgt
-    alphas = [alpha] * ntrgt
-    for i in range(ntrgt):
-        cvelook, uhatk = method(poly_evals, evaluations[:, i])
-        alphak = alphas[i] * uhatk
-        polynomialk = polynomials[i] * uhatk
-        while cvelook < eloos[i]:
-            eloos[i] = cvelook
-            polynomials[i] = polynomialk
-            alphas[i] = alphak
-            fouriers[i] = uhatk
-            surrogates[i] = numpoly.sum(polynomialk * uhatk)
+    # Determine the cardinality: number of polynomial basis elements
+    if poly_evals_0.ndim > 1:
+        cardinality = poly_evals_0.shape[1]
+    else:
+        cardinality = len(poly_evals_0)
 
-            cvelook = np.inf
-            alphakt = alphak[:, uhatk != 0]
-            for t in range(3):
-                new_alpha = generate_fn_basis(alphakt, 1, config)
-                alphakt = np.hstack((alphakt, new_alpha))
-                polynomialkt = generate_expansion_from_alpha(
-                    alphakt, config.distribution, "ttr"
+    logging.info(
+        f"Finished precomputation for (p={config.order}, q={config.cross_truncation:.3f}). Cardinality: {cardinality}"
+    )
+
+    # Initialize the storage for best models per target
+    best_regressions = [None] * ntrgt
+    best_polynomials = [None] * ntrgt
+
+    if config.idtargets:
+        trgts = config.idtargets
+    else:
+        trgts = range(ntrgt)
+
+    T = 3
+    # Loop over each target
+    for i in trgts:
+        cveloo_k, uhat_k = method(poly_evals_0, evaluations[:, i])
+        cveloo_old = np.inf
+        alpha_k = alpha_0
+        loop = 0
+        while True:
+            cveloo_k = np.inf
+            idnonzero_k = uhat_k != 0
+            alpha_k = alpha_k[idnonzero_k, :]
+            for t in range(T):
+                alpha_kt = generate_fn_basis(alpha_k, config)
+                polynomials_kt = generate_expansion_from_alpha(
+                    alpha_k, config.distribution
                 )
-                poly_evalkt = polynomialkt(*samples).T
-                cvelookt, uhatkt = method(poly_evalkt, evaluations[:, i])
+                poly_evals_kt = polynomials_kt.evaluate_basis(samples)
 
-                if cvelookt < cvelook:
-                    cvelook = cvelookt
-                    uhatk = uhatkt
-                    alphak = alphakt
-                    polynomialk = polynomialkt
+                cveloo_kt, uhat_kt = method(poly_evals_kt, evaluations[:, i])
 
-    pass
+                if cveloo_kt < cveloo_k:
+                    cveloo_k = cveloo_kt
+                    uhat_k = uhat_kt
+                    alpha_k = alpha_kt
+                    tk = t
+
+            loop += 1
+            if cveloo_k > cveloo_old:
+                logging.info(
+                    f"REGRESSION: Nsamples: {n} Loop: {loop} T: {tk} Mean-ELOO: {cveloo_k:.4f} "
+                    f"Target ID: {i} Cardinality: {np.count_nonzero(uhat_k)} - {len(uhat_k)} - ELOO NOT IMPROVED"
+                )
+                break
+
+            cveloo_old = cveloo_k
+            best_regressions[i] = uhat_k
+            best_polynomials[i] = polynomial
+            logging.info(
+                f"REGRESSION: Nsamples: {n} Loop: {loop} T: {tk} Mean-ELOO: {cveloo_k:.4f} "
+                f"Target ID: {i} Cardinality: {np.count_nonzero(uhat_k)} - {len(uhat_k)} - UPDATED"
+            )
+
+    return best_polynomials, best_regressions
 
 
 def lars_loo_cv(X, y):
@@ -654,39 +725,6 @@ def get_eloo(X, x, y):
     return eloo
 
 
-def generate_fn_basis(alpha, N: int, config: SensitivityConfiguration):
-    fn_config = copy.deepcopy(config)
-    fn_config.cross_truncation = 1.0
-    d = fn_config.distribution.lower.shape[0]
-
-    if alpha is None:
-        combinations = [abs(count_number_coeffs(p, d, 1.0) - N) for p in range(1, 20)]
-        order = combinations.index(min(combinations))
-        fn_config.order = order
-        alpha, polyno = generate_polynomials(fn_config)
-
-        return alpha, polyno
-
-    II = np.eye(d, d, dtype=int)
-
-    # Calculate all possible forward neighboughrs
-    I_NEW = II[np.newaxis, :, :]
-    FWD = (I_NEW + alpha.T[:, np.newaxis, :]).reshape(d * alpha.shape[1], d)
-
-    # Get all unique elements that are not already in alpha
-    FWD = np.unique(FWD, axis=0)
-    mask = ~np.any(np.all(FWD[:, np.newaxis] == alpha.T, axis=2), axis=1)
-    FWD_UQ = FWD[mask]
-
-    BWD = FWD_UQ[:, np.newaxis, :] - I_NEW
-
-    comparison = BWD[:, :, np.newaxis, :] == alpha.T[np.newaxis, :, :]
-    contained = np.any(np.all(comparison, axis=-1), axis=-1)
-    idx = np.where(np.all(contained, axis=1))[0]
-
-    return FWD_UQ[idx].T
-
-
 def get_analytical_mean(fouriers):
     return np.array([fourier[0] for fourier in fouriers])
 
@@ -758,7 +796,6 @@ def get_sampling_from_experiment(
         }
 
         samples_r = sampler.sample(sp, nsamples, calc_second_order=config.sobol_second)
-
         samples_q = np.column_stack(
             [
                 config.distribution.marginals[i].icdf(samples_r[:, i])
@@ -812,7 +849,8 @@ def get_sa_from_experiment(
 
     if method == "pce":
         polyno, fourier = pce(samples, y, config)
-        alpha = [polyno.multi_index_set.T for _ in range(len(fourier))]
+        alpha = [polyno.multi_index_set.T] * len(fourier)
+        polyno = [polyno] * len(fourier)
     elif method == "pq-lars-loo":
         polyno, fourier = pq_loo_cv(samples, y, config, lars_loo_cv)
         alpha = [pol.multi_index_set.T if pol is not None else None for pol in polyno]
@@ -823,7 +861,14 @@ def get_sa_from_experiment(
         polyno, fourier = pq_loo_cv(samples, y, config, sp_loo_cv)
         alpha = [pol.multi_index_set.T if pol is not None else None for pol in polyno]
     elif method == "fn-lars-loo":
-        alpha, fourier, surrogate = fn_loo_cv(samples, y, config, lars_loo_cv)
+        polyno, fourier = fn_loo_cv(samples, y, config, lars_loo_cv)
+        alpha = [pol.multi_index_set.T if pol is not None else None for pol in polyno]
+    elif method == "fn-omp-loo":
+        polyno, fourier = fn_loo_cv(samples, y, config, omp_loo_cv)
+        alpha = [pol.multi_index_set.T if pol is not None else None for pol in polyno]
+    elif method == "fn-sp-loo":
+        polyno, fourier = fn_loo_cv(samples, y, config, sp_loo_cv)
+        alpha = [pol.multi_index_set.T if pol is not None else None for pol in polyno]
     elif method == "salib":
         if config.rule != "sobol":
             raise ValueError(
@@ -846,14 +891,10 @@ def get_sa_from_experiment(
 
     if method == "salib":
         return sobol
-    elif method == "pce":
+    elif all(pol is not None for pol in polyno) and all(
+        fou is not None for fou in fourier
+    ):
         sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, config)
         return fourier, polyno, alpha, sobol, sobol_2, sobol_t
     else:
-        if all(pol is not None for pol in polyno) and all(
-            fou is not None for fou in fourier
-        ):
-            sobol_t, sobol_2, sobol = get_analytical_sobol(fourier, alpha, config)
-            return fourier, polyno, alpha, sobol, sobol_2, sobol_t
-        else:
-            return fourier, polyno, alpha, None, None, None
+        return fourier, polyno, alpha, None, None, None
