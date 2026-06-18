@@ -58,16 +58,17 @@ class ComsolConfiguration:
 
 @dataclasses.dataclass
 class PybammConfiguration:
-    names: list[str]
+    names: list[str | list[str]]
     expression: list[str]
-    sto: list[float]
     conditions: PybammExperimentalConfigurations
     xinterp: np.ndarray | None  # X-axis limits for interpolation
+    parameter_set: str = "Chen2020"
+    sto: list[float] | None = None # If grouped parameter model these are included
     options: dict | None = None
     ncores: int = 1
     modeltype: str = "DFN"
     solver_safety: bool = False
-    parameter_set: str = "Chen2020"
+    extra_params: dict | None = None
 
 
 @dataclasses.dataclass

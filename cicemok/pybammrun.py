@@ -11,6 +11,7 @@ import numpy as np
 from scipy import interpolate
 
 from cicemok.configuration import PybammConfiguration, ExperimentType
+from cicemok.grouped_dfn_dl import GroupedDFNDoubleLayer
 
 
 def load_model(config: PybammConfiguration) -> pybamm.BaseModel:
@@ -21,12 +22,14 @@ def load_model(config: PybammConfiguration) -> pybamm.BaseModel:
             "DFN": pybamm.lithium_ion.DFN(),
             "SPM": pybamm.lithium_ion.SPM(),
             "SPMe": pybamm.lithium_ion.SPMe(),
+            "GroupedDFNDoubleLayer": GroupedDFNDoubleLayer(),
         }
     else:
         model_map = {
             "DFN": pybamm.lithium_ion.DFN(config.options),
             "SPM": pybamm.lithium_ion.SPM(config.options),
             "SPMe": pybamm.lithium_ion.SPMe(config.options),
+            "GroupedDFNDoubleLayer": GroupedDFNDoubleLayer(config.options),
         }
 
     return model_map.get(config.modeltype, pybamm.lithium_ion.DFN())
@@ -71,12 +74,21 @@ def set_input_parameters(
 ) -> pybamm.ParameterValues:
     """Set model parameters."""
     for key in config.names:
-        parameters[key] = "[input]"
+        if isinstance(key, list):
+            for s in key:
+                parameters[s] = "[input]"
+        else:
+            parameters[key] = "[input]"
 
-    parameters["Initial concentration in negative electrode [mol.m-3]"] = "[input]"
-    parameters["Initial concentration in positive electrode [mol.m-3]"] = "[input]"
-    parameters["Lower voltage cut-off [V]"] = "[input]"
-    parameters["Upper voltage cut-off [V]"] = "[input]"
+    if config.modeltype == "GroupedDFNDoubleLayer":
+        parameters["Initial SoC"] = "[input]"
+        parameters["Lower voltage cut-off [V]"] = "[input]"
+        parameters["Upper voltage cut-off [V]"] = "[input]"
+    else:
+        parameters["Initial concentration in negative electrode [mol.m-3]"] = "[input]"
+        parameters["Initial concentration in positive electrode [mol.m-3]"] = "[input]"
+        parameters["Lower voltage cut-off [V]"] = "[input]"
+        parameters["Upper voltage cut-off [V]"] = "[input]"
 
     if config.conditions.temp is not None and config.conditions.init_temp is not None:
         parameters["Ambient temperature [K]"] = "[input]"
@@ -112,23 +124,32 @@ def set_model_parameters(
         input = input.tolist()
 
     # Parameters to analyze
-    parameters: dict[str, float] = {k: v for k, v in zip(config.names, input)}
+    parameters: dict[str, float] = {
+        s: v
+        for k, v in zip(config.names, input, strict=True)
+        for s in (k if isinstance(k, list) else [k])
+    }
 
     # Conditions
-    aux_parameters = simulation.parameter_values
-    csinit_n, csinit_p = set_soc(aux_parameters, config)
+    if config.modeltype == "GroupedDFNDoubleLayer":
+        parameters["Initial SoC"] = config.conditions.isoc
+        parameters["Lower voltage cut-off [V]"] = config.conditions.cutoff[0]
+        parameters["Upper voltage cut-off [V]"] = config.conditions.cutoff[1]
+    else:
+        aux_parameters = simulation.parameter_values
+        csinit_n, csinit_p = set_soc(aux_parameters, config)
 
-    parameters["Initial concentration in negative electrode [mol.m-3]"] = csinit_n
-    parameters["Initial concentration in positive electrode [mol.m-3]"] = csinit_p
-    parameters["Lower voltage cut-off [V]"] = config.conditions.cutoff[0]
-    parameters["Upper voltage cut-off [V]"] = config.conditions.cutoff[1]
+        parameters["Initial concentration in negative electrode [mol.m-3]"] = csinit_n
+        parameters["Initial concentration in positive electrode [mol.m-3]"] = csinit_p
+        parameters["Lower voltage cut-off [V]"] = config.conditions.cutoff[0]
+        parameters["Upper voltage cut-off [V]"] = config.conditions.cutoff[1]
 
     if config.conditions.temp is not None and config.conditions.init_temp is not None:
         parameters["Ambient temperature [K]"] = config.conditions.temp
         parameters["Initial temperature [K]"] = config.conditions.init_temp
 
     if config.conditions.experiment == ExperimentType.CC:
-        parameters["Current function [A]"] = config.experiment.current
+        parameters["Current function [A]"] = config.conditions.current
 
     return parameters
 
@@ -169,8 +190,17 @@ def run_pybamm_model(
 
 def setup(config: PybammConfiguration):
     model = load_model(config)
-    params = pybamm.ParameterValues(config.parameter_set)
+
+    if config.parameter_set == "Chen2020" and isinstance(model, GroupedDFNDoubleLayer):
+        params = model.default_parameter_values
+    else:
+        params = pybamm.ParameterValues(config.parameter_set)
+
     params = set_input_parameters(params, config)
+
+    if config.extra_params is not None:
+        for key, value in config.extra_params.items():
+            params[key] = value
 
     if config.solver_safety:
         solver = pybamm.CasadiSolver(mode="safe")
@@ -193,15 +223,29 @@ def setup(config: PybammConfiguration):
     return sim
 
 
-def setup_pybamm_worker(config: PybammConfiguration, event: multiprocessing.Event):
+def setup_pybamm_worker(
+    config: list[PybammConfiguration] | PybammConfiguration,
+    event: multiprocessing.Event,
+):
     global sim
-    sim = setup(config)
+
+    if isinstance(config, list):
+        sim = {}
+        for idx, cfg in enumerate(config):
+            sim[idx] = setup(cfg)
+    else:
+        sim = setup(config)
     event.set()
 
 
-def pybamm_worker_pool(sample: Iterable[Any], config: PybammConfiguration):
+def pybamm_worker_pool(
+    sample: Iterable[Any], config: PybammConfiguration, cfg_idx: int = None
+):
     global sim
 
-    result = run_pybamm_model(sample, sim, config)
+    if isinstance(sim, dict) and cfg_idx is not None:
+        result = run_pybamm_model(sample, sim[cfg_idx], config)
+    else:
+        result = run_pybamm_model(sample, sim, config)
 
     return result

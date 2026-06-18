@@ -25,6 +25,7 @@ from UQpy.transformations import Nataf
 from cicemok import comsol, pybammrun, sensitivity
 from cicemok.configuration import (
     ComsolConfiguration,
+    ExperimentType,
     PybammConfiguration,
     PybammExperimentalConfigurations,
     ExperimentConfiguration,
@@ -59,7 +60,7 @@ class PybammProblem(Problem):
         experiments: list[np.ndarray],
         configs: list[PybammConfiguration],
         dist: JointIndependent,
-        model: pybamm.Simulation | None = None,
+        model: dict[int, pybamm.Simulation] | None = None,
         pool=None,
         n_var=-1,
         n_obj=1,
@@ -98,7 +99,6 @@ class PybammProblem(Problem):
         objectives = []
 
         z = x.copy()
-
         # Inverse rosenblatt for independent mutlivariate distribution of standard uniform samples U[0, 1]
         x = np.column_stack(
             [
@@ -113,17 +113,18 @@ class PybammProblem(Problem):
             if self._pool is None:
                 assert self._model is not None
                 results = [
-                    pybammrun.run_pybamm_model(sample, self._model, config)
+                    pybammrun.run_pybamm_model(sample, self._model[idx], config)
                     for sample in x
                 ]
             else:
-                func = partial(pybammrun.pybamm_worker_pool, config=config)
+                func = partial(pybammrun.pybamm_worker_pool, config=config, cfg_idx=idx)
                 results = self._pool.map(func, x)
 
             try:
                 common_axis, evaluations = sensitivity.curate_none_evaluations(
                     results, x
                 )
+
                 f = interpolate.interp1d(
                     experiment[:, 0],
                     experiment[:, 1],
@@ -203,6 +204,7 @@ class ComsolProblem(Problem):
         self._experiments = experiments
         self._configs = configs
         self._model = model
+        self._interpolate = interpolate
 
     def _evaluate(
         self,
@@ -388,8 +390,9 @@ def optimize_parameters_multi_obj_pybamm(
     n_gen: int,
     pop_size: int,
     multi_obj: bool,
-    loads: list[np.ndarray | float],
-    experiments: list[np.ndarray],
+    loads: list[pybamm.Experiment | pybamm.Interpolant | float],
+    experiment_type: list[ExperimentType],
+    experimental_reference: list[np.ndarray],
     isocs: list[float],
     texps: list[float],
     dist: JointIndependent,
@@ -401,22 +404,34 @@ def optimize_parameters_multi_obj_pybamm(
     ncores: int = 1,
     solver_safety: bool = False,
     parameter_set: str = "Chen2020",
+    extra_params: dict | None = None,
+    options: dict | None = None
 ):
-    assert all(len(var) == len(loads) for var in [loads, experiments, isocs, texps])
+    assert all(len(var) == len(loads) for var in [loads, experiment_type, isocs, texps])
     assert len(dist.marginals) == len(names)
 
     pybamm_cfg = PybammConfiguration(
         names=names,
         expression=expression,
         sto=sto,
-        modeltype=modeltype,
         conditions=None,
-        experiment=None,
-        xinterp=xinterp,
+        xinterp=xinterp, ## POSSIBLY ADD XINTERP AS EXPERIMENTAL CONFIG
+        options=options,
         ncores=ncores,
+        modeltype=modeltype,
         solver_safety=solver_safety,
         parameter_set=parameter_set,
+        extra_params=extra_params
     )
+
+    cfgs = []
+    for load, exp, texp, isoc in zip(loads, experiment_type, texps, isocs):
+        current_cfg = PybammExperimentalConfigurations(
+            texp=[0, texp], isoc=isoc, experiment=exp, current=load
+        )
+        tmp_cfg = dataclasses.replace(pybamm_cfg)
+        tmp_cfg.conditions = current_cfg
+        cfgs.append(tmp_cfg)
 
     if npool > 1:
         ctx = multiprocessing.get_context("spawn")
@@ -425,30 +440,23 @@ def optimize_parameters_multi_obj_pybamm(
         pool = ctx.Pool(
             processes=npool,
             initializer=pybammrun.setup_pybamm_worker,
-            initargs=(pybamm_cfg, init_event),
+            initargs=(cfgs, init_event),
             maxtasksperchild=100,
         )
         init_event.wait()
     else:
-        simulation = pybammrun.setup(pybamm_cfg)
-
-    cfgs = []
-    for load, texp, isoc in zip(loads, texps, isocs):
-        current_cfg = PybammExperimentalConfigurations(
-            texp=[0, texp], isoc=isoc, experiment=None, current=load
-        )
-        tmp_cfg = dataclasses.replace(pybamm_cfg)
-        tmp_cfg.conditions = current_cfg
-        cfgs.append(tmp_cfg)
+        simulation = {}
+        for idx, config in enumerate(cfgs):
+            simulation[idx] = pybammrun.setup(config)
 
     if multi_obj:
-        n_obj = len(experiments)
+        n_obj = len(experiment_type)
     else:
         n_obj = 1
 
     if npool > 1:
         problem = PybammProblem(
-            experiments,
+            experimental_reference,
             cfgs,
             dist,
             None,
@@ -460,7 +468,7 @@ def optimize_parameters_multi_obj_pybamm(
         )
     else:
         problem = PybammProblem(
-            experiments,
+            experimental_reference,
             cfgs,
             dist,
             simulation,

@@ -1,25 +1,17 @@
 import copy
-import math
 import logging
-import os
-import pickle
-import dill
-from typing import Callable
 from functools import partial
+from typing import Callable
 
 import numpy as np
+import UQpy.sampling as sampling
+import UQpy.surrogates as surrogates
 
 # from TorchSisso import Regressor
-from SALib import ProblemSpec
 from SALib.analyze import sobol as analyzer
 from SALib.sample import sobol as sampler
-from scipy import interpolate
 from sklearn.linear_model import Lars, OrthogonalMatchingPursuit
 from sklearn.neighbors import KNeighborsRegressor
-
-import UQpy.surrogates as surrogates
-import UQpy.sampling as sampling
-from UQpy.transformations import Nataf
 
 from cicemok import comsol, pybammrun
 from cicemok.configuration import (
@@ -178,6 +170,7 @@ def precompute_polynomial_bases(
         and 'poly_evals' is the result of evaluating its basis on the samples.
     """
     precomputed = {}
+    config.precomputed_poly = {}
     q_values = np.linspace(0.5, config.cross_truncation, 5)
 
     logging.info("Starting precomputation of polynomial bases.")
@@ -192,6 +185,9 @@ def precompute_polynomial_bases(
             local_config.cross_truncation = q
 
             polynomial = generate_polynomials(local_config)
+            logging.info(
+                f"Computed polynomials for (p={p}, q={q:.3f}). Evaluating basis..."
+            )
             poly_evals = polynomial.evaluate_basis(samples)
 
             # Determine the cardinality: number of polynomial basis elements
@@ -210,7 +206,18 @@ def precompute_polynomial_bases(
     return precomputed
 
 
+# def generate_fn_basis(alpha, config: SensitivityConfiguration) -> np.ndarray:
+#     alphaT = alpha.T
+#
+#     alphaT_set = set(map(tuple, alphaT))
+#
+#     candidate = set()
+#     for lam in alphaT_set:
+#         lam = np.ndarray(lam, dtype=int)
+
+
 def generate_fn_basis(alpha, config: SensitivityConfiguration):
+    config.precomputed_poly = {}
     fn_config = copy.deepcopy(config)
     fn_config.cross_truncation = 1.0
     d = len(config.distribution.marginals)
@@ -790,7 +797,7 @@ def get_sampling_from_experiment(
             )
 
         sp = {
-            "names": experiment.names,
+            "names": [f"x{str(i)}" for i in experiment.names],
             "bounds": [[0.0, 1.0]] * len(config.distribution.marginals),
             "num_vars": len(experiment.names),
         }
