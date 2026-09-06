@@ -37,24 +37,6 @@ additional requirements:
 - Some alternative sensitivity implementations also use optional packages such
   as `dill`, `numpoly`, and `TorchSisso`.
 
-## How the pieces fit together
-
-```text
-Cycler CSV/XLSX --> experiments --> reference curves
-
-configuration --> comsol / pybammrun --> curves --> sensitivity
-                         ^                         |        |
-                         |                         |        +--> Sobol indices
-                 grouped DFN models                |        +--> surrogate models
-                                                   |        +--> optimisation / OED
-
-OCP and full-cell data ----------------------------------> balancing
-```
-
-Model runners standardize their results around a shared axis (usually time or
-voltage) plus one or more response columns. That makes the same sampling and
-surrogate tools usable with either COMSOL or PyBaMM.
-
 ## Module guide
 
 | Module | What it is for |
