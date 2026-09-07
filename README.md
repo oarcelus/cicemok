@@ -8,11 +8,12 @@ analysis, parameter fitting, and experiment-design workflows.
 In practical terms, the project helps you:
 
 - run a battery model over a distribution of uncertain parameters;
-- fit polynomial-chaos or sparse-regression surrogate models;
+- fit (sparse-)polynomial-chaos surrogate models;
 - calculate Sobol sensitivity indices for model outputs;
-- calibrate parameters against reference curves and explore electrode balance;
-- generate and assess current profiles for informative experiments; and
-- import and analyse GITT or ICI cycler data.
+- calibrate parameters against reference curves 
+- stablish electrode stochiometry limits by reconstructing full-cell OCV curves from half-cell OCP curves;
+- generate current profiles that maximize certain parameter sensitivities (experimetal)
+- import and analyse GITT or ICI cycler data (Neware).
 
 This is research code, not a polished command-line application. The examples are
 valuable workflow templates, but many expect external model files, generated
